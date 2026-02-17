@@ -26,7 +26,7 @@
     "@prisma/client": "^5.8.1",
     "axios": "^1.6.5",
     "bcryptjs": "^2.4.3",
-    "canvas": "^2.11.2",
+    "@napi-rs/canvas": "^0.1.63",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
