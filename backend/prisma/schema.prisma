@@ -1,0 +1,340 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  password      String
+  fullName      String
+  role          Role      @default(USER)
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  documents       Document[]
+  conversations   Conversation[]
+  messages        Message[]
+  exportJobs      ExportJob[]
+  refreshTokens   RefreshToken[]
+  messageReactions MessageReaction[]
+
+  @@map("users")
+}
+
+// Refresh tokens for JWT
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// User roles
+enum Role {
+  USER
+  ADMIN
+}
+
+// Document model
+model Document {
+  id               String            @id @default(cuid())
+  userId           String
+  originalName     String
+  filename         String            @unique
+  filepath         String
+  mimeType         String
+  fileSize         Int
+  status           DocumentStatus    @default(PENDING)
+  processingError  String?
+  
+  // OCR and processing results
+  extractedText    String?
+  summary          String?
+  category         String?
+  tags             String[]
+  
+  // SAP-specific metadata
+  sapMetadata      SAPMetadata?
+  
+  // Timestamps
+  uploadedAt       DateTime          @default(now())
+  processedAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  // Relations
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  images           DocumentImage[]
+  vectorEmbeddings VectorEmbedding[]
+
+  @@map("documents")
+}
+
+// Document processing status
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// SAP-specific metadata
+model SAPMetadata {
+  id          String   @id @default(cuid())
+  documentId  String   @unique
+  tcodes      String[] // SAP transaction codes
+  modules     String[] // SAP modules (FI, CO, MM, etc.)
+  errorCodes  String[] // SAP error codes found
+  processes   String[] // Business processes identified
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("sap_metadata")
+}
+
+// Extracted images from documents
+model DocumentImage {
+  id         String   @id @default(cuid())
+  documentId String
+  filename   String
+  filepath   String
+  mimeType   String
+  width      Int?
+  height     Int?
+  size       Int
+  pageNumber Int?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("document_images")
+}
+
+// Vector embeddings for semantic search
+model VectorEmbedding {
+  id         String                @id @default(cuid())
+  documentId String?
+  messageId  String?
+  content    String
+  embedding  Float[]
+  metadata   Json?
+  type       VectorEmbeddingType   @default(DOCUMENT)
+  createdAt  DateTime             @default(now())
+
+  // Relations
+  document Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  message  Message?  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("vector_embeddings")
+}
+
+enum VectorEmbeddingType {
+  DOCUMENT
+  MESSAGE
+  QUERY
+}
+
+// Conversation model
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  summary   String?
+  metadata  Json?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@map("conversations")
+}
+
+// Message model
+model Message {
+  id             String            @id @default(cuid())
+  conversationId String
+  userId         String?
+  role           MessageRole
+  content        String
+  metadata       Json?
+  tokenCount     Int?
+  processingTime Int?              // milliseconds
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  // Relations
+  conversation     Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user             User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  images           MessageImage[]
+  reactions        MessageReaction[]
+  vectorEmbeddings VectorEmbedding[]
+
+  @@map("messages")
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// Message images (screenshots, generated images)
+model MessageImage {
+  id        String   @id @default(cuid())
+  messageId String
+  filename  String
+  filepath  String
+  mimeType  String
+  width     Int?
+  height    Int?
+  size      Int
+  alt       String?
+  caption   String?
+  createdAt DateTime @default(now())
+
+  // Relations
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("message_images")
+}
+
+// Message reactions (like/dislike)
+model MessageReaction {
+  id        String           @id @default(cuid())
+  messageId String
+  userId    String
+  reaction  MessageReactionType
+  createdAt DateTime         @default(now())
+
+  // Relations
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@map("message_reactions")
+}
+
+enum MessageReactionType {
+  LIKE
+  DISLIKE
+  HELPFUL
+  UNHELPFUL
+}
+
+// Export jobs
+model ExportJob {
+  id          String           @id @default(cuid())
+  userId      String
+  type        ExportType
+  format      ExportFormat
+  itemIds     String[]         // IDs of conversations, documents, etc.
+  status      ExportStatus     @default(PENDING)
+  progress    Int              @default(0) // 0-100
+  options     Json?
+  filename    String?
+  filepath    String?
+  fileSize    Int?
+  error       String?
+  estimatedTime Int?           // seconds
+  startedAt   DateTime?
+  completedAt DateTime?
+  expiresAt   DateTime?        // when the export file expires
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("export_jobs")
+}
+
+enum ExportType {
+  CONVERSATION
+  DOCUMENT
+  BATCH
+  SCHEDULED
+}
+
+enum ExportFormat {
+  PDF
+  DOCX
+  MARKDOWN
+  JSON
+  ZIP
+}
+
+enum ExportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// Export templates
+model ExportTemplate {
+  id          String               @id @default(cuid())
+  name        String
+  description String?
+  format      ExportFormat
+  template    Json                 // Template configuration
+  isDefault   Boolean              @default(false)
+  isPublic    Boolean              @default(false)
+  userId      String?              // null for system templates
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@map("export_templates")
+}
+
+// Audit log
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  resource  String?
+  resourceId String?
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+// System configuration
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("system_config")
+}
