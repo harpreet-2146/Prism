@@ -1,23 +1,15 @@
-// backend/src/services/pdf/image-extractor.service.js
 'use strict';
 
 /**
- * CRIT-02 / CRIT-03 FIX:
- *
- * Old broken approach:
- *   - Used pdf-parse v1 (npm) which has NO image extraction API
- *   - Called unpdf.extractImages() which does NOT EXIST in unpdf
- *
- * Correct approach (this file):
- *   - Uses pdfjs-dist + canvas to RENDER each PDF page as a JPEG image
- *   - Works 100% reliably for any PDF — captures exactly what the user sees
- *   - SAP GUI screenshots in PDFs are page renders, not embedded images
- *   - Respects MAX_PAGES_TO_EXTRACT env var so large PDFs don't hang
+ * CRITICAL FIX: Set up canvas polyfills BEFORE requiring pdfjs-dist
+ * This prevents "Cannot polyfill DOMMatrix/Path2D" warnings
  */
+global.DOMMatrix = class DOMMatrix {};
+global.Path2D = class Path2D {};
 
 const path = require('path');
 const fs = require('fs').promises;
-const { createCanvas } = require('canvas');
+const { createCanvas } = require('@napi-rs/canvas');
 const config = require('../../config');
 const { logger } = require('../../utils/logger');
 
@@ -26,7 +18,6 @@ const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
 // Disable the web worker — not available in Node.js
 pdfjsLib.GlobalWorkerOptions.workerSrc = false;
-
 class ImageExtractorService {
   /**
    * Render PDF pages as JPEG images and save them to disk.
