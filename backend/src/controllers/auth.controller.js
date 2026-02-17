@@ -7,9 +7,10 @@ const { logger } = require('../utils/logger');
 class AuthController {
   register = async (req, res) => {
     try {
-      const { email, password, fullName } = req.body;
-      const result = await authService.register(email, password, fullName);
-
+      const { email, password, name, fullName } = req.body;
+      // Use whichever field the client sent
+      const userName = name || fullName || null;
+      const result = await authService.register(email, password, userName);
       res.status(201).json({
         success: true,
         message: 'Account created successfully',
