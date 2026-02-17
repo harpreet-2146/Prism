@@ -1,140 +1,51 @@
+// backend/src/routes/chat.routes.js
+'use strict';
+
 const express = require('express');
 const chatController = require('../controllers/chat.controller');
-const { 
-  validateSendMessage, 
-  validateCreateConversation, 
-  validateUpdateConversation,
-  validatePagination,
-  validateUUIDParam 
-} = require('../middleware/validation.middleware');
-const { 
-  authenticateToken, 
-  refreshTokenIfNeeded,
-  checkOwnership,
-  userRateLimit 
-} = require('../middleware/auth.middleware');
+const { verifyToken } = require('../middleware/auth.middleware');
+const { validateBody, validateParams, validateQuery, schemas } = require('../middleware/validation.middleware');
 
 const router = express.Router();
 
-// All chat routes require authentication
-router.use(authenticateToken);
-router.use(refreshTokenIfNeeded);
+// All chat routes require auth
+router.use(verifyToken);
 
-// Apply rate limiting for chat operations
-router.use(userRateLimit(100, 15 * 60 * 1000)); // 100 requests per 15 minutes
+// Health
+router.get('/health', chatController.healthCheck);
 
-// Conversation routes
-router.get('/conversations', 
-  validatePagination,
-  chatController.getConversations
+// Streaming chat (SSE)
+router.post('/stream',
+  validateBody(schemas.chatMessage),
+  chatController.streamChat
 );
 
-router.post('/conversations', 
-  validateCreateConversation,
-  chatController.createConversation
-);
-
-router.get('/conversations/:id', 
-  validateUUIDParam,
-  checkOwnership('userId'), // Check if user owns the conversation
-  chatController.getConversation
-);
-
-router.put('/conversations/:id', 
-  validateUUIDParam,
-  validateUpdateConversation,
-  checkOwnership('userId'),
-  chatController.updateConversation
-);
-
-router.delete('/conversations/:id', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.deleteConversation
-);
-
-// Message routes
-router.get('/conversations/:id/messages', 
-  validateUUIDParam,
-  validatePagination,
-  checkOwnership('userId'),
-  chatController.getMessages
-);
-
-router.post('/conversations/:id/messages', 
-  validateUUIDParam,
-  validateSendMessage,
-  checkOwnership('userId'),
-  userRateLimit(50, 15 * 60 * 1000), // 50 messages per 15 minutes
+// Non-streaming chat (fallback)
+router.post('/message',
+  validateBody(schemas.chatMessage),
   chatController.sendMessage
 );
 
-router.put('/messages/:id', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.updateMessage
+// Conversations
+router.get('/conversations',
+  validateQuery(schemas.pagination),
+  chatController.getConversations
 );
 
-router.delete('/messages/:id', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.deleteMessage
+router.get('/conversations/:id',
+  validateParams(schemas.uuidParam),
+  chatController.getConversation
 );
 
-// Special message operations
-router.post('/messages/:id/regenerate', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  userRateLimit(20, 15 * 60 * 1000), // 20 regenerations per 15 minutes
-  chatController.regenerateResponse
+router.patch('/conversations/:id/title',
+  validateParams(schemas.uuidParam),
+  validateBody(schemas.updateTitle),
+  chatController.updateTitle
 );
 
-router.post('/messages/:id/react', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.reactToMessage
-);
-
-// Stream message endpoint (Server-Sent Events)
-router.get('/conversations/:id/stream', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.streamMessages
-);
-
-// Search conversations and messages
-router.get('/search', 
-  validatePagination,
-  chatController.searchConversations
-);
-
-// Get conversation statistics
-router.get('/stats', chatController.getStats);
-
-// Export conversation
-router.post('/conversations/:id/export', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.exportConversation
-);
-
-// Get conversation summary
-router.get('/conversations/:id/summary', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.getConversationSummary
-);
-
-// Share conversation (generate public link)
-router.post('/conversations/:id/share', 
-  validateUUIDParam,
-  checkOwnership('userId'),
-  chatController.shareConversation
-);
-
-// Get shared conversation (public route)
-router.get('/shared/:shareToken', 
-  chatController.getSharedConversation
+router.delete('/conversations/:id',
+  validateParams(schemas.uuidParam),
+  chatController.deleteConversation
 );
 
 module.exports = router;

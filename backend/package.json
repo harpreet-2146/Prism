@@ -1,57 +1,75 @@
 {
   "name": "prism-backend",
   "version": "1.0.0",
-  "description": "PRISM Backend - SAP Document Management and AI Assistant API",
+  "description": "PRISM - Intelligent Visual Assistant for SAP Software",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "dev:debug": "nodemon --inspect src/server.js",
+    "lint": "eslint src/ --ext .js",
+    "lint:fix": "eslint src/ --ext .js --fix",
+    "format": "prettier --write 'src/**/*.js'",
     "test": "jest",
-    "lint": "eslint src/",
-    "format": "prettier --write src/",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "db:generate": "prisma generate",
-    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:reset": "prisma migrate reset",
     "db:seed": "node prisma/seed.js",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "logs:clear": "rm -rf logs/*.log"
   },
-  "keywords": ["sap", "document-management", "ai", "assistant", "ocr"],
-  "author": "PRISM Development Team",
-  "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "dotenv": "^16.3.1",
+    "@huggingface/inference": "^2.6.4",
+    "@prisma/client": "^5.8.1",
+    "axios": "^1.6.5",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "prisma": "^5.6.0",
-    "@prisma/client": "^5.6.0",
-    "pdf-parse": "^1.1.1",
-    "sharp": "^0.32.6",
-    "handlebars": "^4.7.8",
-    "puppeteer": "^21.5.2",
-    "mammoth": "^1.6.0",
-    "groq-sdk": "^0.5.0",
-    "@google-ai/generativelanguage": "^2.5.0",
-    "google-auth-library": "^9.4.0",
-    "winston": "^3.11.0",
-    "joi": "^17.11.0",
+    "canvas": "^2.11.2",
     "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
-    "express-validator": "^7.0.1",
-    "node-cron": "^3.0.3",
-    "archiver": "^6.0.1",
-    "uuid": "^9.0.1"
+    "docx": "^8.5.0",
+    "groq-sdk": "^0.3.3",
+    "handlebars": "^4.7.8",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^3.11.174",
+    "puppeteer": "^21.9.0",
+    "sharp": "^0.33.2",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
+    "nodemon": "^3.0.2",
+    "prisma": "^5.8.1",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.1",
     "jest": "^29.7.0",
-    "supertest": "^6.3.3",
-    "eslint": "^8.54.0",
-    "prettier": "^3.1.0"
+    "supertest": "^6.3.4",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
+  },
+  "keywords": [
+    "sap", "ai", "assistant", "pdf", "documentation", "chatbot",
+    "express", "prisma", "postgresql"
+  ],
+  "license": "MIT",
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "lint-staged": {
+    "*.js": ["eslint --fix", "prettier --write"]
   }
 }

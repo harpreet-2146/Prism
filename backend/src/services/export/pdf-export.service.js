@@ -1,720 +1,327 @@
-const fs = require('fs').promises;
-const path = require('path');
+// backend/src/services/export/pdf-export.service.js
+'use strict';
+
 const puppeteer = require('puppeteer');
+const Handlebars = require('handlebars');
+const path = require('path');
+const fs = require('fs').promises;
+const { v4: uuidv4 } = require('uuid');
 const config = require('../../config');
-const logger = require('../../utils/logger');
-const { AppError } = require('../../middleware/error.middleware');
+const { logger } = require('../../utils/logger');
+
+// Register Handlebars helpers
+Handlebars.registerHelper('inc', (value) => parseInt(value) + 1);
+Handlebars.registerHelper('hasSteps', (steps) => Array.isArray(steps) && steps.length > 0);
+
+// ----------------------------------------------------------------
+// HTML template for PDF export
+// Inline to avoid file path issues across environments
+// ----------------------------------------------------------------
+const HTML_TEMPLATE = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}} — PRISM Export</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #1a1a2e;
+      background: #ffffff;
+      padding: 40px;
+    }
+    .header {
+      border-bottom: 3px solid #4f46e5;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .header h1 { font-size: 22px; color: #4f46e5; font-weight: 700; }
+    .header .meta { font-size: 11px; color: #6b7280; text-align: right; }
+    .conversation { display: flex; flex-direction: column; gap: 20px; }
+    .message { border-radius: 8px; padding: 16px 20px; }
+    .message.user {
+      background: #f3f4f6;
+      border-left: 4px solid #4f46e5;
+      margin-left: 40px;
+    }
+    .message.assistant {
+      background: #fafafa;
+      border-left: 4px solid #10b981;
+      margin-right: 40px;
+    }
+    .message-role {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+    }
+    .message.user .message-role { color: #4f46e5; }
+    .message.assistant .message-role { color: #10b981; }
+    .message-content { color: #374151; white-space: pre-wrap; word-break: break-word; }
+    .summary { font-size: 14px; font-weight: 500; color: #111827; margin-bottom: 16px; }
+    .steps { margin-top: 12px; }
+    .step {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+      padding: 12px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+    }
+    .step-number {
+      flex-shrink: 0;
+      width: 26px;
+      height: 26px;
+      background: #4f46e5;
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .step-content { flex: 1; }
+    .step-title { font-weight: 600; color: #111827; margin-bottom: 4px; }
+    .step-desc { color: #4b5563; font-size: 12px; }
+    .tcode {
+      display: inline-block;
+      background: #ede9fe;
+      color: #5b21b6;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-top: 4px;
+    }
+    .sources {
+      margin-top: 12px;
+      padding: 8px 12px;
+      background: #eff6ff;
+      border-radius: 6px;
+      font-size: 11px;
+      color: #1d4ed8;
+    }
+    .footer {
+      margin-top: 40px;
+      padding-top: 16px;
+      border-top: 1px solid #e5e7eb;
+      font-size: 11px;
+      color: #9ca3af;
+      text-align: center;
+    }
+    .timestamp { font-size: 11px; color: #9ca3af; margin-top: 6px; }
+    @media print {
+      body { padding: 20px; }
+      .message { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>{{title}}</h1>
+      <p class="meta">PRISM SAP AI Assistant Export</p>
+    </div>
+    <div class="meta">
+      <div>Exported: {{exportDate}}</div>
+      <div>{{messageCount}} messages</div>
+    </div>
+  </div>
+
+  <div class="conversation">
+    {{#each messages}}
+    <div class="message {{role}}">
+      <div class="message-role">{{#if (eq role "user")}}You{{else}}PRISM Assistant{{/if}}</div>
+
+      {{#if (eq role "assistant")}}
+        {{#if parsed}}
+          {{#if parsed.summary}}
+          <div class="summary">{{parsed.summary}}</div>
+          {{/if}}
+
+          {{#if (hasSteps parsed.steps)}}
+          <div class="steps">
+            {{#each parsed.steps}}
+            <div class="step">
+              <div class="step-number">{{inc @index}}</div>
+              <div class="step-content">
+                <div class="step-title">{{this.title}}</div>
+                <div class="step-desc">{{this.description}}</div>
+                {{#if this.tcode}}<div class="tcode">T-Code: {{this.tcode}}</div>{{/if}}
+              </div>
+            </div>
+            {{/each}}
+          </div>
+          {{/if}}
+        {{else}}
+          <div class="message-content">{{content}}</div>
+        {{/if}}
+
+        {{#if sources.length}}
+        <div class="sources">
+          📎 Sources: {{#each sources}}{{this.title}}{{#unless @last}}, {{/unless}}{{/each}}
+        </div>
+        {{/if}}
+      {{else}}
+        <div class="message-content">{{content}}</div>
+      {{/if}}
+
+      <div class="timestamp">{{formatTime createdAt}}</div>
+    </div>
+    {{/each}}
+  </div>
+
+  <div class="footer">
+    Generated by PRISM — Intelligent Visual Assistant for SAP Software
+  </div>
+</body>
+</html>
+`;
+
+// Register eq helper for Handlebars
+Handlebars.registerHelper('eq', (a, b) => a === b);
+Handlebars.registerHelper('formatTime', (date) => {
+  if (!date) return '';
+  return new Date(date).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+});
 
 class PDFExportService {
   constructor() {
-    this.browser = null;
-    this.defaultOptions = {
-      format: 'A4',
-      margin: {
-        top: '20mm',
-        bottom: '20mm',
-        left: '15mm',
-        right: '15mm'
-      },
-      printBackground: true,
-      preferCSSPageSize: false,
-      displayHeaderFooter: true,
-      headerTemplate: '<div></div>',
-      footerTemplate: `
-        <div style="font-size: 10px; margin: 0 auto; color: #666; width: 100%; text-align: center;">
-          <span class="pageNumber"></span> / <span class="totalPages"></span>
-        </div>
-      `
-    };
+    this.template = Handlebars.compile(HTML_TEMPLATE);
+    this._ensureExportDir();
   }
 
-  /**
-   * Initialize browser instance
-   */
-  async initializeBrowser() {
+  async _ensureExportDir() {
     try {
-      if (!this.browser) {
-        this.browser = await puppeteer.launch({
-          headless: 'new',
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-          ]
-        });
-
-        logger.info('PDF browser initialized');
-      }
-
-      return this.browser;
-    } catch (error) {
-      logger.error('Browser initialization error:', error);
-      throw new AppError('Failed to initialize PDF generation browser', 500);
-    }
+      await fs.mkdir(config.EXPORT_TEMP_DIR, { recursive: true });
+    } catch {}
   }
 
   /**
-   * Generate PDF from template data
+   * Export a conversation to PDF.
+   *
+   * @param {Object} conversation  - Conversation record from DB
+   * @param {Array}  messages      - Message records from DB
+   * @returns {string} Absolute path to the generated PDF file
    */
-  async generatePDF(templateData, outputPath, options = {}) {
-    let page = null;
-
-    try {
-      // Initialize browser
-      const browser = await this.initializeBrowser();
-      page = await browser.newPage();
-
-      // Set viewport for consistent rendering
-      await page.setViewport({ width: 1200, height: 1600 });
-
-      // Generate HTML content
-      const htmlContent = await this.buildHTMLContent(templateData);
-
-      // Set content
-      await page.setContent(htmlContent, {
-        waitUntil: 'networkidle0',
-        timeout: 30000
-      });
-
-      // PDF generation options
-      const pdfOptions = {
-        ...this.defaultOptions,
-        ...options,
-        path: outputPath
-      };
-
-      // Generate PDF
-      await page.pdf(pdfOptions);
-
-      logger.info('PDF generated successfully', {
-        outputPath,
-        fileExists: await this.fileExists(outputPath)
-      });
-
-      return outputPath;
-
-    } catch (error) {
-      logger.error('PDF generation error:', error);
-      throw new AppError('Failed to generate PDF', 500);
-    } finally {
-      if (page) {
-        await page.close();
-      }
-    }
-  }
-
-  /**
-   * Build complete HTML content for PDF
-   */
-  async buildHTMLContent(templateData) {
-    const { content, theme, metadata } = templateData;
-    
-    const html = `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${metadata?.title || 'PRISM Export'}</title>
-        <style>
-          ${await this.generatePDFStyles(theme)}
-        </style>
-      </head>
-      <body>
-        ${content}
-      </body>
-      </html>
-    `;
-
-    return html;
-  }
-
-  /**
-   * Generate PDF-optimized CSS styles
-   */
-  async generatePDFStyles(theme = {}) {
-    const {
-      primaryColor = '#0066cc',
-      secondaryColor = '#f5f5f5',
-      textColor = '#333333',
-      headerColor = '#ffffff',
-      fontFamily = 'Arial, sans-serif'
-    } = theme;
-
-    return `
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        font-family: ${fontFamily};
-        font-size: 12px;
-        line-height: 1.6;
-        color: ${textColor};
-        margin: 0;
-        padding: 0;
-        background: white;
-        -webkit-print-color-adjust: exact;
-        color-adjust: exact;
-      }
-
-      .page-header {
-        background: ${primaryColor};
-        color: ${headerColor};
-        padding: 20px;
-        margin-bottom: 30px;
-        text-align: center;
-        border-radius: 8px;
-      }
-
-      .page-header h1 {
-        margin: 0;
-        font-size: 24px;
-        font-weight: bold;
-      }
-
-      .page-header .subtitle {
-        margin: 5px 0 0 0;
-        font-size: 14px;
-        opacity: 0.9;
-      }
-
-      .content-section {
-        margin-bottom: 30px;
-        page-break-inside: avoid;
-      }
-
-      .section-title {
-        font-size: 18px;
-        font-weight: bold;
-        color: ${primaryColor};
-        border-bottom: 2px solid ${primaryColor};
-        padding-bottom: 5px;
-        margin-bottom: 15px;
-      }
-
-      .item-card {
-        background: ${secondaryColor};
-        border: 1px solid #ddd;
-        border-left: 4px solid ${primaryColor};
-        padding: 15px;
-        margin-bottom: 20px;
-        border-radius: 6px;
-        page-break-inside: avoid;
-      }
-
-      .item-title {
-        font-size: 16px;
-        font-weight: bold;
-        color: ${primaryColor};
-        margin-bottom: 10px;
-      }
-
-      .item-meta {
-        font-size: 11px;
-        color: #666;
-        margin-bottom: 10px;
-        border-bottom: 1px solid #eee;
-        padding-bottom: 8px;
-      }
-
-      .message-container {
-        margin: 10px 0;
-      }
-
-      .message {
-        padding: 10px;
-        margin: 8px 0;
-        border-radius: 6px;
-        page-break-inside: avoid;
-      }
-
-      .message.user {
-        background: #e3f2fd;
-        border-left: 3px solid #2196f3;
-        margin-left: 20px;
-      }
-
-      .message.assistant {
-        background: #f5f5f5;
-        border-left: 3px solid ${primaryColor};
-        margin-right: 20px;
-      }
-
-      .message-role {
-        font-weight: bold;
-        font-size: 11px;
-        color: #666;
-        margin-bottom: 5px;
-        text-transform: uppercase;
-      }
-
-      .message-content {
-        white-space: pre-wrap;
-        word-wrap: break-word;
-      }
-
-      .message-time {
-        font-size: 10px;
-        color: #999;
-        text-align: right;
-        margin-top: 5px;
-      }
-
-      .tcode {
-        background: ${primaryColor};
-        color: ${headerColor};
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-family: 'Courier New', monospace;
-        font-size: 11px;
-        font-weight: bold;
-      }
-
-      .sap-module {
-        background: #4caf50;
-        color: white;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 10px;
-        margin: 0 2px;
-      }
-
-      .document-content {
-        background: #fafafa;
-        border: 1px solid #ddd;
-        padding: 15px;
-        margin: 10px 0;
-        border-radius: 4px;
-        font-size: 11px;
-      }
-
-      .statistics {
-        background: #f8f9fa;
-        border: 1px solid #dee2e6;
-        border-radius: 6px;
-        padding: 15px;
-        margin: 20px 0;
-      }
-
-      .stat-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 5px 0;
-        border-bottom: 1px solid #eee;
-      }
-
-      .stat-row:last-child {
-        border-bottom: none;
-      }
-
-      .stat-label {
-        font-weight: bold;
-        color: #666;
-      }
-
-      .stat-value {
-        color: ${primaryColor};
-        font-weight: bold;
-      }
-
-      .metadata-section {
-        background: #f8f9fa;
-        border-radius: 6px;
-        padding: 12px;
-        margin: 10px 0;
-        font-size: 11px;
-      }
-
-      .metadata-row {
-        margin: 3px 0;
-      }
-
-      .metadata-label {
-        font-weight: bold;
-        color: #666;
-        display: inline-block;
-        width: 120px;
-      }
-
-      .table-container {
-        margin: 15px 0;
-        overflow-x: auto;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 11px;
-        margin: 10px 0;
-      }
-
-      th, td {
-        border: 1px solid #ddd;
-        padding: 8px;
-        text-align: left;
-        vertical-align: top;
-      }
-
-      th {
-        background: ${primaryColor};
-        color: ${headerColor};
-        font-weight: bold;
-      }
-
-      tr:nth-child(even) {
-        background: #f9f9f9;
-      }
-
-      .page-break {
-        page-break-before: always;
-      }
-
-      .no-break {
-        page-break-inside: avoid;
-      }
-
-      .text-center {
-        text-align: center;
-      }
-
-      .text-right {
-        text-align: right;
-      }
-
-      .footer-info {
-        margin-top: 30px;
-        padding-top: 20px;
-        border-top: 1px solid #ddd;
-        font-size: 10px;
-        color: #666;
-        text-align: center;
-      }
-
-      /* Code styling */
-      code {
-        background: #f4f4f4;
-        border: 1px solid #ddd;
-        border-radius: 3px;
-        padding: 2px 4px;
-        font-family: 'Courier New', monospace;
-        font-size: 10px;
-      }
-
-      pre {
-        background: #f4f4f4;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        padding: 10px;
-        overflow-x: auto;
-        font-size: 10px;
-        page-break-inside: avoid;
-      }
-
-      /* Print-specific styles */
-      @media print {
-        body {
-          font-size: 11px;
-        }
-        
-        .page-header {
-          margin-bottom: 20px;
-        }
-        
-        .item-card {
-          margin-bottom: 15px;
-        }
-        
-        .no-print {
-          display: none;
-        }
-      }
-
-      /* Responsive adjustments */
-      @media (max-width: 600px) {
-        body {
-          font-size: 11px;
-        }
-        
-        .page-header {
-          padding: 15px;
-        }
-        
-        .item-card {
-          padding: 12px;
-        }
-      }
-    `;
-  }
-
-  /**
-   * Generate PDF with custom header and footer
-   */
-  async generatePDFWithCustomHeaderFooter(templateData, outputPath, options = {}) {
-    const headerHTML = options.headerHTML || this.getDefaultHeader(templateData);
-    const footerHTML = options.footerHTML || this.getDefaultFooter(templateData);
-
-    return await this.generatePDF(templateData, outputPath, {
-      ...options,
-      displayHeaderFooter: true,
-      headerTemplate: headerHTML,
-      footerTemplate: footerHTML,
-      margin: {
-        top: '40mm',
-        bottom: '30mm',
-        left: '15mm',
-        right: '15mm'
-      }
-    });
-  }
-
-  /**
-   * Get default header HTML
-   */
-  getDefaultHeader(templateData) {
-    const title = templateData.metadata?.title || 'PRISM Export';
-    const date = new Date().toLocaleDateString();
-
-    return `
-      <div style="font-size: 12px; width: 100%; padding: 10px 20px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center;">
-        <div style="font-weight: bold; color: #0066cc;">${title}</div>
-        <div style="color: #666;">${date}</div>
-      </div>
-    `;
-  }
-
-  /**
-   * Get default footer HTML
-   */
-  getDefaultFooter(templateData) {
-    const exportedBy = templateData.metadata?.exportedBy?.fullName || 'PRISM User';
-
-    return `
-      <div style="font-size: 10px; width: 100%; padding: 10px 20px; border-top: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; color: #666;">
-        <div>Exported by ${exportedBy} - PRISM Document Management</div>
-        <div>Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>
-      </div>
-    `;
-  }
-
-  /**
-   * Generate PDF from URL
-   */
-  async generatePDFFromURL(url, outputPath, options = {}) {
-    let page = null;
-
-    try {
-      const browser = await this.initializeBrowser();
-      page = await browser.newPage();
-
-      await page.goto(url, {
-        waitUntil: 'networkidle0',
-        timeout: 30000
-      });
-
-      const pdfOptions = {
-        ...this.defaultOptions,
-        ...options,
-        path: outputPath
-      };
-
-      await page.pdf(pdfOptions);
-
-      logger.info('PDF generated from URL', { url, outputPath });
-      return outputPath;
-
-    } catch (error) {
-      logger.error('PDF from URL error:', error);
-      throw new AppError('Failed to generate PDF from URL', 500);
-    } finally {
-      if (page) {
-        await page.close();
-      }
-    }
-  }
-
-  /**
-   * Generate PDF with page numbers and table of contents
-   */
-  async generatePDFWithTOC(templateData, outputPath, options = {}) {
-    try {
-      // Extract headings for TOC
-      const toc = this.extractTableOfContents(templateData.content);
-      
-      // Build content with TOC
-      const enhancedContent = this.buildContentWithTOC(templateData.content, toc);
-      
-      const enhancedTemplateData = {
-        ...templateData,
-        content: enhancedContent,
-        tableOfContents: toc
-      };
-
-      return await this.generatePDF(enhancedTemplateData, outputPath, options);
-
-    } catch (error) {
-      logger.error('PDF with TOC error:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Extract table of contents from HTML content
-   */
-  extractTableOfContents(htmlContent) {
-    const toc = [];
-    const headingRegex = /<h([1-6])[^>]*>(.*?)<\/h[1-6]>/gi;
-    let match;
-    let counter = 1;
-
-    while ((match = headingRegex.exec(htmlContent)) !== null) {
-      const level = parseInt(match[1]);
-      const text = match[2].replace(/<[^>]*>/g, ''); // Strip HTML tags
-      const anchor = `heading-${counter}`;
-
-      toc.push({
-        level,
-        text,
-        anchor,
-        page: null // Would be filled by PDF processor
-      });
-
-      counter++;
-    }
-
-    return toc;
-  }
-
-  /**
-   * Build content with table of contents
-   */
-  buildContentWithTOC(originalContent, toc) {
-    let content = originalContent;
-    
-    // Add anchors to headings
-    let counter = 1;
-    content = content.replace(/<h([1-6])([^>]*)>/gi, (match, level, attributes) => {
-      const anchor = `heading-${counter}`;
-      counter++;
-      return `<h${level}${attributes} id="${anchor}">`;
+  async exportConversation(conversation, messages) {
+    const start = Date.now();
+
+    logger.info('Starting PDF export', {
+      conversationId: conversation.id,
+      messageCount: messages.length,
+      component: 'pdf-export'
     });
 
-    // Generate TOC HTML
-    const tocHTML = this.generateTOCHTML(toc);
-    
-    // Insert TOC after the first header or at the beginning
-    const insertPosition = content.indexOf('</div>') + 6; // After first header div
-    content = content.slice(0, insertPosition) + tocHTML + content.slice(insertPosition);
-
-    return content;
-  }
-
-  /**
-   * Generate table of contents HTML
-   */
-  generateTOCHTML(toc) {
-    if (toc.length === 0) return '';
-
-    let tocHTML = `
-      <div class="table-of-contents page-break">
-        <h2 class="section-title">Table of Contents</h2>
-        <ul class="toc-list">
-    `;
-
-    toc.forEach(item => {
-      const indent = (item.level - 1) * 20;
-      tocHTML += `
-        <li style="margin-left: ${indent}px; margin-bottom: 5px;">
-          <a href="#${item.anchor}" style="text-decoration: none; color: #0066cc;">
-            ${item.text}
-          </a>
-        </li>
-      `;
+    // Parse assistant message content
+    const enrichedMessages = messages.map(msg => {
+      if (msg.role === 'assistant') {
+        return {
+          ...msg,
+          parsed: this._tryParseJSON(msg.content),
+          sources: msg.sources || []
+        };
+      }
+      return msg;
     });
 
-    tocHTML += `
-        </ul>
-      </div>
-    `;
+    const html = this.template({
+      title: conversation.title || 'SAP Assistant Conversation',
+      exportDate: new Date().toLocaleDateString('en-US', {
+        year: 'numeric', month: 'long', day: 'numeric'
+      }),
+      messageCount: messages.length,
+      messages: enrichedMessages
+    });
 
-    return tocHTML;
-  }
+    const filename = `prism_export_${uuidv4()}.pdf`;
+    const outputPath = path.join(config.EXPORT_TEMP_DIR, filename);
 
-  /**
-   * Close browser instance
-   */
-  async closeBrowser() {
+    let browser;
     try {
-      if (this.browser) {
-        await this.browser.close();
-        this.browser = null;
-        logger.info('PDF browser closed');
-      }
-    } catch (error) {
-      logger.error('Error closing browser:', error);
-    }
-  }
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu'
+        ]
+      });
 
-  /**
-   * Check if file exists
-   */
-  async fileExists(filePath) {
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Get PDF generation statistics
-   */
-  getStats() {
-    return {
-      browserInitialized: !!this.browser,
-      defaultFormat: this.defaultOptions.format,
-      defaultMargins: this.defaultOptions.margin,
-      features: {
-        headerFooter: true,
-        tableOfContents: true,
-        customStyling: true,
-        urlGeneration: true,
-        backgroundGraphics: true
-      }
-    };
-  }
-
-  /**
-   * Health check
-   */
-  async healthCheck() {
-    try {
-      const browser = await this.initializeBrowser();
       const page = await browser.newPage();
-      
-      await page.setContent('<html><body><h1>Test</h1></body></html>');
-      await page.pdf({ format: 'A4' });
-      
-      await page.close();
-      
-      return {
-        status: 'healthy',
-        browserReady: true,
-        puppeteerVersion: puppeteer.version || 'unknown'
-      };
+      await page.setContent(html, { waitUntil: 'networkidle0', timeout: config.EXPORT_TIMEOUT_MS });
 
+      await page.pdf({
+        path: outputPath,
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '15mm', bottom: '15mm', left: '12mm', right: '12mm' }
+      });
+
+      logger.info('PDF export complete', {
+        conversationId: conversation.id,
+        filename,
+        ms: Date.now() - start,
+        component: 'pdf-export'
+      });
+
+      return { filename, filePath: outputPath };
+
+    } finally {
+      if (browser) await browser.close();
+    }
+  }
+
+  _tryParseJSON(content) {
+    try {
+      const cleaned = content
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+      return JSON.parse(cleaned);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Delete old export files (call periodically to clean up).
+   * Removes files older than maxAgeMs.
+   */
+  async cleanupOldExports(maxAgeMs = 60 * 60 * 1000) {
+    try {
+      const files = await fs.readdir(config.EXPORT_TEMP_DIR);
+      const now = Date.now();
+      let deleted = 0;
+
+      for (const file of files) {
+        const filePath = path.join(config.EXPORT_TEMP_DIR, file);
+        const stat = await fs.stat(filePath);
+        if (now - stat.mtimeMs > maxAgeMs) {
+          await fs.unlink(filePath);
+          deleted++;
+        }
+      }
+
+      if (deleted > 0) {
+        logger.info('Export cleanup complete', { deleted, component: 'pdf-export' });
+      }
     } catch (error) {
-      logger.error('PDF service health check failed:', error);
-      return {
-        status: 'error',
-        message: error.message,
-        browserReady: false
-      };
+      logger.warn('Export cleanup failed', { error: error.message, component: 'pdf-export' });
     }
   }
 }

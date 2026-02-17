@@ -1,148 +1,128 @@
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const compression = require('compression');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+// backend/src/server.js
+'use strict';
 
-const config = require('./config');
-const logger = require('./utils/logger');
-const errorMiddleware = require('./middleware/error.middleware');
-const routes = require('./routes');
+const express    = require('express');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const morgan     = require('morgan');
+const compression = require('compression');
+const path       = require('path');
+
+const config  = require('./config');
+const routes  = require('./routes');
+const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
+const { standard: standardRateLimit }   = require('./middleware/rate-limit.middleware');
+const { logger } = require('./utils/logger');
 
 const app = express();
 
-// Security middleware
+// ----------------------------------------------------------------
+// Trust proxy — required for Railway / any reverse proxy
+// ----------------------------------------------------------------
+app.set('trust proxy', 1);
+
+// ----------------------------------------------------------------
+// Security headers
+// ----------------------------------------------------------------
 app.use(helmet({
+  crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      mediaSrc: ["'self'"],
-      frameSrc: ["'none'"],
-    },
-  },
-  crossOriginEmbedderPolicy: false
+      imgSrc:     ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https:']
+    }
+  }
 }));
 
-// CORS configuration
-const corsOptions = {
+// ----------------------------------------------------------------
+// CORS
+// ----------------------------------------------------------------
+app.use(cors({
   origin: (origin, callback) => {
-    const allowedOrigins = config.cors.allowedOrigins;
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+
+    const allowed = config.FRONTEND_URL.split(',').map(u => u.trim());
+    if (allowed.includes(origin)) {
+      return callback(null, true);
     }
+
+    // In development, allow localhost on any port
+    if (config.NODE_ENV === 'development' && origin.startsWith('http://localhost')) {
+      return callback(null, true);
+    }
+
+    callback(new Error(`CORS: origin "${origin}" not allowed`));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-};
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-app.use(cors(corsOptions));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: config.rateLimiting.windowMs,
-  max: config.rateLimiting.maxRequests,
-  message: {
-    error: 'Too many requests from this IP, please try again later.',
-    retryAfter: Math.ceil(config.rateLimiting.windowMs / 1000)
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === '/health' || req.path === '/api/health';
-  }
-});
-
-app.use('/api/', limiter);
-
-// Body parsing middleware
+// ----------------------------------------------------------------
+// Request parsing & compression
+// ----------------------------------------------------------------
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static file serving
-app.use('/uploads', express.static(config.uploads.directory));
-app.use('/exports', express.static(config.exports.directory));
+// ----------------------------------------------------------------
+// HTTP request logging
+// ----------------------------------------------------------------
+app.use(morgan(config.NODE_ENV === 'production' ? 'combined' : 'dev', {
+  stream: { write: msg => logger.http(msg.trim()) }
+}));
 
-// Request logging
-app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`, {
-    ip: req.ip,
-    userAgent: req.get('User-Agent'),
-    timestamp: new Date().toISOString()
-  });
-  next();
-});
+// ----------------------------------------------------------------
+// Rate limiting — all API routes
+// ----------------------------------------------------------------
+app.use('/api', standardRateLimit);
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: config.env,
-    version: require('../package.json').version
-  });
-});
+// ----------------------------------------------------------------
+// Static file serving — uploaded document images
+// ----------------------------------------------------------------
+app.use('/uploads', express.static(path.resolve(config.UPLOAD_DIR), {
+  maxAge: config.NODE_ENV === 'production' ? '1d' : 0,
+  etag: true
+}));
 
+// ----------------------------------------------------------------
 // API routes
+// ----------------------------------------------------------------
 app.use('/api', routes);
 
-// 404 handler for undefined routes
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found',
-    path: req.originalUrl,
-    method: req.method,
-    timestamp: new Date().toISOString()
-  });
-});
+// ----------------------------------------------------------------
+// 404 + Global error handler (must be last)
+// ----------------------------------------------------------------
+app.use(notFoundHandler);
+app.use(errorHandler);
 
-// Global error handler
-app.use(errorMiddleware);
+// ----------------------------------------------------------------
+// Start server
+// ----------------------------------------------------------------
+async function start() {
+  try {
+    // Ensure export temp directory exists
+    const fs = require('fs');
+    if (!fs.existsSync(config.EXPORT_TEMP_DIR)) {
+      fs.mkdirSync(config.EXPORT_TEMP_DIR, { recursive: true });
+    }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
+    app.listen(config.PORT, () => {
+      logger.info(`PRISM backend running`, {
+        port: config.PORT,
+        environment: config.NODE_ENV,
+        component: 'server'
+      });
+    });
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  process.exit(0);
-});
+  } catch (error) {
+    logger.error('Failed to start server', { error: error.message });
+    process.exit(1);
+  }
+}
 
-// Unhandled promise rejection handler
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
+start();
 
-// Uncaught exception handler
-process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception:', error);
-  process.exit(1);
-});
-
-const PORT = config.port || 5000;
-const server = app.listen(PORT, () => {
-  logger.info(`🚀 PRISM Backend Server running on port ${PORT}`);
-  logger.info(`📊 Environment: ${config.env}`);
-  logger.info(`🔗 CORS enabled for: ${config.cors.allowedOrigins.join(', ')}`);
-  logger.info(`📁 Upload directory: ${config.uploads.directory}`);
-  logger.info(`📤 Export directory: ${config.exports.directory}`);
-});
-
-// Export for testing
-module.exports = { app, server };
+module.exports = app; // exported for testing

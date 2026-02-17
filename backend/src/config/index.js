@@ -1,132 +1,164 @@
-const path = require('path');
+// backend/src/config/index.js
+
+'use strict';
+
+require('dotenv').config();
+
+// ================================================================
+// HELPERS
+// ================================================================
+
+/**
+ * Required env var — crashes with a clear message if missing
+ */
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value || value.trim() === '') {
+    console.error(`\nFATAL: Missing required environment variable: ${name}`);
+    console.error('Copy .env.example to .env and fill in all required values.\n');
+    process.exit(1);
+  }
+  return value.trim();
+}
+
+/**
+ * Optional env var — returns defaultValue if not set
+ */
+function optionalEnv(name, defaultValue = undefined) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') return defaultValue;
+  return value.trim();
+}
+
+/**
+ * Optional boolean env var
+ */
+function optionalBool(name, defaultValue = false) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') return defaultValue;
+  const lower = value.trim().toLowerCase();
+  return lower === 'true' || lower === '1' || lower === 'yes';
+}
+
+/**
+ * Optional integer env var
+ */
+function optionalInt(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') return defaultValue;
+  const parsed = parseInt(value.trim(), 10);
+  if (isNaN(parsed)) {
+    console.warn(`WARNING: Invalid integer for ${name}: "${value}". Using default: ${defaultValue}`);
+    return defaultValue;
+  }
+  return parsed;
+}
+
+/**
+ * Optional float env var
+ */
+function optionalFloat(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') return defaultValue;
+  const parsed = parseFloat(value.trim());
+  if (isNaN(parsed)) {
+    console.warn(`WARNING: Invalid float for ${name}: "${value}". Using default: ${defaultValue}`);
+    return defaultValue;
+  }
+  return parsed;
+}
+
+// ================================================================
+// REQUIRED VARIABLES — app won't start without these
+// ================================================================
+
+const DATABASE_URL      = requireEnv('DATABASE_URL');
+const JWT_SECRET        = requireEnv('JWT_SECRET');
+const JWT_REFRESH_SECRET = requireEnv('JWT_REFRESH_SECRET');
+
+// ================================================================
+// FULL CONFIG OBJECT — everything from environment, nothing hardcoded
+// ================================================================
+
+const PORT = optionalInt('PORT', 5000);
 
 const config = {
-  env: process.env.NODE_ENV || 'development',
-  port: parseInt(process.env.PORT, 10) || 5000,
-  apiVersion: process.env.API_VERSION || 'v1',
+  // ---- Application ----
+  NODE_ENV:     optionalEnv('NODE_ENV', 'development'),
+  PORT,
+  FRONTEND_URL: optionalEnv('FRONTEND_URL', 'http://localhost:5173'),
+  BASE_URL:     optionalEnv('BASE_URL', `http://localhost:${PORT}`),
 
-  // Database configuration
-  database: {
-    url: process.env.DATABASE_URL,
-  },
+  // ---- Database ----
+  DATABASE_URL,
 
-  // JWT configuration
-  jwt: {
-    secret: process.env.JWT_SECRET || 'your-fallback-secret-key',
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-    refreshSecret: process.env.JWT_REFRESH_SECRET || 'your-fallback-refresh-secret',
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d'
-  },
+  // ---- JWT / Auth ----
+  JWT_SECRET,
+  JWT_REFRESH_SECRET,
+  JWT_ACCESS_EXPIRES_IN:  optionalEnv('JWT_ACCESS_EXPIRES_IN', '15m'),
+  JWT_REFRESH_EXPIRES_IN: optionalEnv('JWT_REFRESH_EXPIRES_IN', '7d'),
 
-  // AI Services configuration
-  ai: {
-    groq: {
-      apiKey: process.env.GROQ_API_KEY,
-      model: 'llama-3.1-8b-instant',
-      maxTokens: 8192
-    },
-    google: {
-      apiKey: process.env.GOOGLE_AI_API_KEY,
-      model: 'gemini-pro'
-    }
-  },
+  // ---- Rate Limiting ----
+  RATE_LIMIT_WINDOW_MS:    optionalInt('RATE_LIMIT_WINDOW_MS', 900000),   // 15 minutes
+  RATE_LIMIT_MAX_REQUESTS: optionalInt('RATE_LIMIT_MAX_REQUESTS', 100),
 
-  // File upload configuration
-  uploads: {
-    directory: path.join(__dirname, '../../', process.env.UPLOAD_DIR || 'uploads'),
-    maxFileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 50 * 1024 * 1024, // 50MB
-    allowedMimeTypes: [
-      'application/pdf',
-      'image/jpeg',
-      'image/png',
-      'image/webp',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    ]
-  },
+  // ---- Groq LLM ----
+  GROQ_API_KEY:   optionalEnv('GROQ_API_KEY'),
+  GROQ_MODEL:     optionalEnv('GROQ_MODEL', 'llama-3.3-70b-versatile'),
+  GROQ_MAX_TOKENS: optionalInt('GROQ_MAX_TOKENS', 3000),
+  GROQ_TEMPERATURE: optionalFloat('GROQ_TEMPERATURE', 0.7),
 
-  // Export configuration
-  exports: {
-    directory: path.join(__dirname, '../../', process.env.EXPORT_DIR || 'exports'),
-    maxRetentionDays: 30,
-    formats: ['pdf', 'docx', 'markdown', 'json']
-  },
+  // ---- HuggingFace ----
+  HF_TOKEN:          optionalEnv('HF_TOKEN'),
+  HF_EMBEDDING_MODEL: optionalEnv('HF_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
+  HF_IMAGE_MODEL:    optionalEnv('HF_IMAGE_MODEL', 'stabilityai/stable-diffusion-2-1'),
+  ENABLE_AI_IMAGE_GENERATION: optionalBool('ENABLE_AI_IMAGE_GENERATION', false),
 
-  // CORS configuration
-  cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
-    allowedOrigins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:5173').split(',')
-  },
+  // ---- Image Fallbacks ----
+  UNSPLASH_ACCESS_KEY: optionalEnv('UNSPLASH_ACCESS_KEY'),
+  PEXELS_API_KEY:      optionalEnv('PEXELS_API_KEY'),
 
-  // Rate limiting configuration
-  rateLimiting: {
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000, // 15 minutes
-    maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 100
-  },
+  // ---- File Uploads ----
+  UPLOAD_DIR:           optionalEnv('UPLOAD_DIR', './uploads'),
+  MAX_FILE_SIZE_MB:     optionalInt('MAX_FILE_SIZE_MB', 50),
+  ALLOWED_MIME_TYPES:   optionalEnv('ALLOWED_MIME_TYPES', 'application/pdf'),
+  MAX_PAGES_TO_EXTRACT: optionalInt('MAX_PAGES_TO_EXTRACT', 50),
+  PDF_IMAGE_SCALE:      optionalFloat('PDF_IMAGE_SCALE', 1.5),
+  PDF_IMAGE_QUALITY:    optionalInt('PDF_IMAGE_QUALITY', 85),
 
-  // Email configuration
-  email: {
-    host: process.env.EMAIL_HOST,
-    port: parseInt(process.env.EMAIL_PORT, 10) || 587,
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-    secure: process.env.EMAIL_SECURE === 'true'
-  },
+  // ---- Exports (Puppeteer PDF) ----
+  EXPORT_TEMP_DIR:      optionalEnv('EXPORT_TEMP_DIR', './exports'),
+  EXPORT_TIMEOUT_MS:    optionalInt('EXPORT_TIMEOUT_MS', 30000),
+  EXPORT_MAX_CONCURRENT: optionalInt('EXPORT_MAX_CONCURRENT', 3),
 
-  // Redis configuration
-  redis: {
-    url: process.env.REDIS_URL || 'redis://localhost:6379'
-  },
-
-  // Encryption configuration
-  encryption: {
-    key: process.env.ENCRYPTION_KEY || 'your-32-character-encryption-key'
-  },
-
-  // Logging configuration
-  logging: {
-    level: process.env.LOG_LEVEL || 'info',
-    file: process.env.LOG_FILE || 'logs/app.log',
-    console: process.env.NODE_ENV !== 'production'
-  },
-
-  // Vector database configuration
-  vectorDB: {
-    milvus: {
-      address: process.env.MILVUS_ADDRESS || 'localhost:19530',
-      username: process.env.MILVUS_USERNAME || '',
-      password: process.env.MILVUS_PASSWORD || ''
-    }
-  },
-
-  // Security configuration
-  security: {
-    bcryptRounds: 12,
-    secureCookies: process.env.SECURE_COOKIES === 'true',
-    trustProxy: process.env.TRUST_PROXY === 'true',
-    sessionSecret: process.env.SESSION_SECRET || 'your-session-secret'
-  },
-
-  // OCR and document processing
-  ocr: {
-    enabled: true,
-    languages: ['eng', 'deu'], // English and German for SAP
-    confidence: 80
-  },
-
-  // SAP-specific configuration
-  sap: {
-    modules: [
-      'FI', 'CO', 'MM', 'SD', 'PP', 'QM', 'PM', 'HR', 'PS', 'WM',
-      'FI-CA', 'IS-U', 'RE-FX', 'IM', 'TR', 'EC', 'SEM', 'BW'
-    ],
-    tcodePatterns: [
-      /^[A-Z]{2,4}\d{0,3}[A-Z]?$/,  // Standard T-Code patterns
-      /^\/[A-Z0-9_]+\/[A-Z0-9_]+$/, // Custom T-Code patterns
-      /^Y[A-Z0-9_]+$/,              // Customer Y* T-Codes
-      /^Z[A-Z0-9_]+$/               // Customer Z* T-Codes
-    ]
-  }
+  // ---- Logging ----
+  LOG_LEVEL: optionalEnv('LOG_LEVEL', 'info'),
 };
+
+// ================================================================
+// FEATURE AVAILABILITY WARNINGS
+// These don't crash the app — they just disable the feature gracefully
+// ================================================================
+
+const warnings = [];
+
+if (!config.GROQ_API_KEY) {
+  warnings.push('GROQ_API_KEY not set — AI chat features will not work');
+}
+if (!config.HF_TOKEN) {
+  warnings.push('HF_TOKEN not set — document embeddings and semantic search will not work');
+}
+if (!config.UNSPLASH_ACCESS_KEY && !config.PEXELS_API_KEY) {
+  warnings.push('UNSPLASH_ACCESS_KEY and PEXELS_API_KEY not set — image fallbacks disabled');
+}
+if (config.ENABLE_AI_IMAGE_GENERATION && !config.HF_TOKEN) {
+  warnings.push('ENABLE_AI_IMAGE_GENERATION=true but HF_TOKEN not set — AI image generation will fail');
+}
+
+if (warnings.length > 0 && config.NODE_ENV !== 'test') {
+  console.warn('\n⚠️  PRISM configuration warnings:');
+  warnings.forEach(w => console.warn(`   • ${w}`));
+  console.warn('');
+}
 
 module.exports = config;

@@ -1,710 +1,344 @@
-const { PrismaClient } = require('@prisma/client');
-const fs = require('fs').promises;
+// backend/src/services/documents.service.js
+'use strict';
+
 const path = require('path');
-const config = require('../config');
-const logger = require('../utils/logger');
-const { AppError } = require('../middleware/error.middleware');
-const { 
-  extractTCodes, 
-  extractSAPModules, 
-  normalizeText,
-  deleteFileIfExists,
-  calculatePagination
-} = require('../utils/helpers');
+const fs = require('fs').promises;
+const { v4: uuidv4 } = require('uuid');
+const prisma = require('../utils/prisma');
 const pdfProcessor = require('./pdf/pdf-processor.service');
 const imageExtractor = require('./pdf/image-extractor.service');
-
-const prisma = new PrismaClient();
+const embeddingSearch = require('./vector/embedding-search.service');
+const { logger } = require('../utils/logger');
+const config = require('../config');
 
 class DocumentsService {
-  /**
-   * Process single document upload
-   */
-  async processUpload(userId, file, metadata = {}) {
-    try {
-      // Create document record
-      const document = await prisma.document.create({
-        data: {
-          userId,
-          originalName: file.originalname,
-          filename: file.filename,
-          filepath: file.path,
-          mimeType: file.mimetype,
-          fileSize: file.size,
-          status: 'PENDING',
-          category: metadata.category || null,
-          tags: metadata.tags ? (Array.isArray(metadata.tags) ? metadata.tags : [metadata.tags]) : []
-        }
-      });
-
-      // Start background processing
-      this.processDocumentAsync(document.id);
-
-      return {
-        id: document.id,
-        originalName: document.originalName,
-        mimeType: document.mimeType,
-        fileSize: document.fileSize,
-        status: document.status,
-        category: document.category,
-        tags: document.tags,
-        createdAt: document.createdAt
-      };
-
-    } catch (error) {
-      logger.error('Process upload error:', error);
-      throw error;
-    }
-  }
+  // ----------------------------------------------------------------
+  // UPLOAD & PROCESS
+  // ----------------------------------------------------------------
 
   /**
-   * Process multiple document uploads
+   * Handle a newly uploaded PDF.
+   * 1. Move from temp → permanent storage
+   * 2. Create DB record
+   * 3. Start async processing (text + images + embeddings)
+   *
+   * @param {Object} file   - Multer file object
+   * @param {string} userId
+   * @returns {Object} The created document record
    */
-  async processMultipleUploads(userId, files, metadata = {}) {
-    const results = [];
+  async uploadDocument(file, userId) {
+    // Move file from temp to permanent storage
+    const permanentPath = path.join(config.UPLOAD_DIR, 'documents', file.filename);
+    await fs.rename(file.path, permanentPath);
 
-    for (const file of files) {
-      try {
-        const document = await this.processUpload(userId, file, metadata);
-        results.push(document);
-      } catch (error) {
-        logger.error('Process multiple upload error for file:', file.originalname, error);
-        // Continue processing other files
-        results.push({
-          originalName: file.originalname,
-          error: error.message,
-          status: 'FAILED'
-        });
+    // Create DB record immediately so the user gets a response fast
+    const document = await prisma.document.create({
+      data: {
+        userId,
+        filename: file.filename,
+        originalName: file.originalname,
+        fileSize: file.size,
+        mimeType: file.mimetype,
+        storagePath: permanentPath,
+        status: 'pending'
       }
-    }
-
-    return results;
-  }
-
-  /**
-   * Process document asynchronously
-   */
-  async processDocumentAsync(documentId) {
-    try {
-      // Update status to processing
-      await prisma.document.update({
-        where: { id: documentId },
-        data: { status: 'PROCESSING' }
-      });
-
-      const document = await prisma.document.findUnique({
-        where: { id: documentId }
-      });
-
-      if (!document) {
-        throw new Error('Document not found');
-      }
-
-      let extractedText = '';
-      let summary = '';
-      const images = [];
-
-      // Process based on file type
-      if (document.mimeType === 'application/pdf') {
-        // Extract text from PDF
-        extractedText = await pdfProcessor.extractText(document.filepath);
-        
-        // Extract images from PDF
-        const pdfImages = await imageExtractor.extractImages(document.filepath);
-        
-        // Save images and create records
-        for (const imageBuffer of pdfImages) {
-          const imagePath = await this.saveExtractedImage(documentId, imageBuffer);
-          images.push(imagePath);
-        }
-      } else if (document.mimeType.startsWith('image/')) {
-        // For images, use OCR if available
-        extractedText = await this.extractTextFromImage(document.filepath);
-      }
-
-      // Normalize extracted text
-      extractedText = normalizeText(extractedText);
-
-      // Extract SAP-specific metadata
-      const sapMetadata = await this.extractSAPMetadata(extractedText);
-
-      // Generate summary
-      if (extractedText) {
-        summary = await this.generateSummary(extractedText);
-      }
-
-      // Update document with processed data
-      await prisma.$transaction(async (prisma) => {
-        // Update document
-        await prisma.document.update({
-          where: { id: documentId },
-          data: {
-            status: 'COMPLETED',
-            extractedText,
-            summary,
-            processedAt: new Date()
-          }
-        });
-
-        // Create SAP metadata if found
-        if (sapMetadata.tcodes.length > 0 || sapMetadata.modules.length > 0) {
-          await prisma.sAPMetadata.create({
-            data: {
-              documentId,
-              tcodes: sapMetadata.tcodes,
-              modules: sapMetadata.modules,
-              errorCodes: sapMetadata.errorCodes,
-              processes: sapMetadata.processes
-            }
-          });
-        }
-
-        // Create image records
-        for (const imagePath of images) {
-          await prisma.documentImage.create({
-            data: {
-              documentId,
-              filename: path.basename(imagePath),
-              filepath: imagePath,
-              mimeType: 'image/jpeg',
-              size: (await fs.stat(imagePath)).size,
-              width: null, // Could extract with image processing library
-              height: null
-            }
-          });
-        }
-      });
-
-      logger.info('Document processed successfully', { documentId });
-
-    } catch (error) {
-      logger.error('Document processing failed:', error);
-
-      // Update document status to failed
-      await prisma.document.update({
-        where: { id: documentId },
-        data: {
-          status: 'FAILED',
-          processingError: error.message
-        }
-      });
-    }
-  }
-
-  /**
-   * Extract SAP metadata from text
-   */
-  async extractSAPMetadata(text) {
-    const tcodes = extractTCodes(text);
-    const modules = extractSAPModules(text);
-    
-    // Extract SAP error codes (pattern: E XXXXX)
-    const errorCodePattern = /E\s+[A-Z0-9]{5}/g;
-    const errorCodes = [...new Set((text.match(errorCodePattern) || []).map(code => code.replace(/\s+/g, ' ').trim()))];
-
-    // Extract business processes (simple keyword matching)
-    const processes = [];
-    const processKeywords = {
-      'Purchase Order': ['purchase order', 'PO creation', 'procurement'],
-      'Invoice Processing': ['invoice', 'billing', 'payment'],
-      'Financial Posting': ['journal entry', 'GL posting', 'accounting'],
-      'Material Management': ['goods receipt', 'inventory', 'material master']
-    };
-
-    const lowerText = text.toLowerCase();
-    for (const [process, keywords] of Object.entries(processKeywords)) {
-      if (keywords.some(keyword => lowerText.includes(keyword))) {
-        processes.push(process);
-      }
-    }
-
-    return {
-      tcodes,
-      modules,
-      errorCodes,
-      processes
-    };
-  }
-
-  /**
-   * Generate document summary
-   */
-  async generateSummary(text) {
-    // Simple extractive summary - take first few sentences
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const summary = sentences.slice(0, 3).join('. ').trim();
-    
-    return summary.length > 500 ? summary.substring(0, 497) + '...' : summary;
-  }
-
-  /**
-   * Save extracted image
-   */
-  async saveExtractedImage(documentId, imageBuffer) {
-    const imagesDir = path.join(config.uploads.directory, 'images');
-    await fs.mkdir(imagesDir, { recursive: true });
-
-    const filename = `${documentId}_${Date.now()}.jpg`;
-    const filepath = path.join(imagesDir, filename);
-
-    await fs.writeFile(filepath, imageBuffer);
-    return filepath;
-  }
-
-  /**
-   * Extract text from image using OCR (placeholder)
-   */
-  async extractTextFromImage(imagePath) {
-    // Placeholder - would use OCR library like Tesseract
-    return '';
-  }
-
-  /**
-   * Search documents
-   */
-  async searchDocuments(userId, searchTerm, options = {}) {
-    const { page = 1, limit = 10 } = options;
-    
-    const where = {
-      userId,
-      OR: [
-        { originalName: { contains: searchTerm, mode: 'insensitive' } },
-        { extractedText: { contains: searchTerm, mode: 'insensitive' } },
-        { summary: { contains: searchTerm, mode: 'insensitive' } },
-        { tags: { hasSome: [searchTerm] } },
-        {
-          sapMetadata: {
-            OR: [
-              { tcodes: { hasSome: [searchTerm.toUpperCase()] } },
-              { modules: { hasSome: [searchTerm.toUpperCase()] } }
-            ]
-          }
-        }
-      ]
-    };
-
-    const total = await prisma.document.count({ where });
-    const pagination = calculatePagination(page, limit, total);
-
-    const documents = await prisma.document.findMany({
-      where,
-      include: {
-        sapMetadata: true,
-        _count: {
-          select: { images: true }
-        }
-      },
-      orderBy: { createdAt: 'desc' },
-      skip: pagination.offset,
-      take: pagination.pageSize
     });
+
+    logger.info('Document record created', {
+      documentId: document.id,
+      userId,
+      originalName: file.originalname,
+      fileSize: file.size,
+      component: 'documents-service'
+    });
+
+    // Process asynchronously — don't block the HTTP response
+    this._processDocument(document.id, userId, permanentPath).catch(error => {
+      logger.error('Background document processing failed', {
+        documentId: document.id,
+        error: error.message,
+        component: 'documents-service'
+      });
+    });
+
+    return document;
+  }
+
+  // ----------------------------------------------------------------
+  // LIST
+  // ----------------------------------------------------------------
+
+  async getUserDocuments(userId, page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+
+    const [documents, total] = await Promise.all([
+      prisma.document.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          originalName: true,
+          fileSize: true,
+          status: true,
+          embeddingStatus: true,
+          sapModule: true,
+          tcodes: true,
+          pageCount: true,
+          imageCount: true,
+          createdAt: true,
+          updatedAt: true
+        }
+      }),
+      prisma.document.count({ where: { userId } })
+    ]);
 
     return {
       documents,
       pagination: {
-        currentPage: pagination.currentPage,
-        totalPages: pagination.totalPages,
-        totalItems: total,
-        itemsPerPage: pagination.pageSize,
-        hasNext: pagination.hasNext,
-        hasPrev: pagination.hasPrev
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
       }
     };
   }
 
-  /**
-   * Get document statistics
-   */
-  async getDocumentStats(userId) {
-    const stats = await prisma.document.groupBy({
-      by: ['status'],
-      where: { userId },
-      _count: { status: true },
-      _sum: { fileSize: true }
-    });
+  // ----------------------------------------------------------------
+  // GET SINGLE
+  // ----------------------------------------------------------------
 
-    const totalDocuments = await prisma.document.count({ where: { userId } });
-    const totalSize = await prisma.document.aggregate({
-      where: { userId },
-      _sum: { fileSize: true }
-    });
-
-    // Get recent activity
-    const recentUploads = await prisma.document.count({
-      where: {
-        userId,
-        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
-      }
-    });
-
-    const byStatus = {};
-    stats.forEach(stat => {
-      byStatus[stat.status.toLowerCase()] = stat._count.status;
-    });
-
-    return {
-      total: totalDocuments,
-      byStatus: {
-        pending: byStatus.pending || 0,
-        processing: byStatus.processing || 0,
-        completed: byStatus.completed || 0,
-        failed: byStatus.failed || 0
-      },
-      totalSize: totalSize._sum.fileSize || 0,
-      recentUploads
-    };
-  }
-
-  /**
-   * Delete document and associated files
-   */
-  async deleteDocument(userId, documentId) {
+  async getDocument(documentId, userId) {
     const document = await prisma.document.findFirst({
       where: { id: documentId, userId },
       include: {
-        images: true,
-        sapMetadata: true
+        images: {
+          orderBy: { pageNumber: 'asc' },
+          select: {
+            id: true,
+            pageNumber: true,
+            imageIndex: true,
+            width: true,
+            height: true,
+            format: true,
+            fileSize: true,
+            storagePath: true
+          }
+        }
       }
     });
 
-    if (!document) {
-      throw new AppError('Document not found', 404);
-    }
+    if (!document) throw new Error('Document not found');
+    return document;
+  }
 
-    // Delete in transaction
-    await prisma.$transaction(async (prisma) => {
-      // Delete SAP metadata
-      if (document.sapMetadata) {
-        await prisma.sAPMetadata.delete({
-          where: { documentId }
+  // ----------------------------------------------------------------
+  // DELETE
+  // ----------------------------------------------------------------
+
+  async deleteDocument(documentId, userId) {
+    const document = await prisma.document.findFirst({
+      where: { id: documentId, userId }
+    });
+
+    if (!document) throw new Error('Document not found');
+
+    // Delete all files — don't throw if already missing
+    await this._deleteDocumentFiles(document.storagePath, documentId);
+
+    // Delete embeddings from vector store
+    await embeddingSearch.deleteDocumentEmbeddings(documentId);
+
+    // Delete DB record (cascades to images + embeddings table)
+    await prisma.document.delete({ where: { id: documentId } });
+
+    logger.info('Document deleted', {
+      documentId,
+      userId,
+      component: 'documents-service'
+    });
+  }
+
+  // ----------------------------------------------------------------
+  // GET IMAGES
+  // ----------------------------------------------------------------
+
+  async getDocumentImages(documentId, userId) {
+    const document = await prisma.document.findFirst({
+      where: { id: documentId, userId },
+      select: { id: true }
+    });
+
+    if (!document) throw new Error('Document not found');
+
+    return prisma.documentImage.findMany({
+      where: { documentId },
+      orderBy: { pageNumber: 'asc' }
+    });
+  }
+
+  /**
+   * Get the absolute storage path for a single image.
+   * Used by the route that serves image files.
+   */
+  async getImageFilePath(documentId, userId, filename) {
+    const document = await prisma.document.findFirst({
+      where: { id: documentId, userId },
+      select: { id: true }
+    });
+
+    if (!document) throw new Error('Document not found');
+
+    const filePath = path.join(config.UPLOAD_DIR, 'images', documentId, filename);
+
+    try {
+      await fs.access(filePath);
+      return filePath;
+    } catch {
+      throw new Error('Image file not found');
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // STATS
+  // ----------------------------------------------------------------
+
+  async getUserStats(userId) {
+    const [totalDocs, statusCounts, totalEmbeddings] = await Promise.all([
+      prisma.document.count({ where: { userId } }),
+      prisma.document.groupBy({
+        by: ['status'],
+        where: { userId },
+        _count: { status: true }
+      }),
+      embeddingSearch.getIndexedChunkCount(userId)
+    ]);
+
+    const byStatus = {};
+    statusCounts.forEach(s => { byStatus[s.status] = s._count.status; });
+
+    return {
+      totalDocuments: totalDocs,
+      byStatus,
+      indexedChunks: totalEmbeddings
+    };
+  }
+
+  // ----------------------------------------------------------------
+  // INTERNAL: Full processing pipeline
+  // ----------------------------------------------------------------
+
+  async _processDocument(documentId, userId, filePath) {
+    try {
+      // Mark as processing
+      await prisma.document.update({
+        where: { id: documentId },
+        data: { status: 'processing' }
+      });
+
+      // ---- Step 1: Extract text ----
+      const { textContent, pageCount, sapMetadata, textChunks } =
+        await pdfProcessor.processText(filePath, documentId);
+
+      // ---- Step 2: Extract images (render pages) ----
+      const extractedImages = await imageExtractor.extractImages(filePath, documentId);
+
+      // ---- Step 3: Save images to DB ----
+      if (extractedImages.length > 0) {
+        await prisma.documentImage.createMany({
+          data: extractedImages.map(img => ({
+            documentId,
+            pageNumber: img.pageNumber,
+            imageIndex: img.imageIndex,
+            storagePath: img.storagePath,
+            width: img.width,
+            height: img.height,
+            format: img.format,
+            fileSize: img.fileSize
+          }))
         });
       }
 
-      // Delete document images records
-      await prisma.documentImage.deleteMany({
-        where: { documentId }
+      // ---- Step 4: Update document record with extracted data ----
+      await prisma.document.update({
+        where: { id: documentId },
+        data: {
+          textContent,
+          pageCount,
+          imageCount: extractedImages.length,
+          sapModule:  sapMetadata.sapModule,
+          tcodes:     sapMetadata.tcodes,
+          errorCodes: sapMetadata.errorCodes,
+          noteNumber: sapMetadata.noteNumber,
+          status: 'completed',
+          embeddingStatus: 'processing'
+        }
       });
 
-      // Delete vector embeddings
-      await prisma.vectorEmbedding.deleteMany({
-        where: { documentId }
+      logger.info('Document processing completed', {
+        documentId,
+        pageCount,
+        imageCount: extractedImages.length,
+        chunkCount: textChunks.length,
+        sapModule: sapMetadata.sapModule,
+        component: 'documents-service'
       });
 
-      // Delete document
-      await prisma.document.delete({
-        where: { id: documentId }
-      });
-    });
-
-    // Delete physical files asynchronously
-    setTimeout(async () => {
+      // ---- Step 5: Generate and store embeddings (separate try — don't fail the whole doc) ----
       try {
-        // Delete main document file
-        await deleteFileIfExists(document.filepath);
-
-        // Delete image files
-        for (const image of document.images) {
-          await deleteFileIfExists(image.filepath);
+        if (textChunks.length > 0 && config.HF_TOKEN) {
+          await embeddingSearch.indexDocumentChunks(userId, documentId, textChunks);
+          await prisma.document.update({
+            where: { id: documentId },
+            data: { embeddingStatus: 'completed' }
+          });
+        } else {
+          await prisma.document.update({
+            where: { id: documentId },
+            data: { embeddingStatus: 'completed' }
+          });
         }
-      } catch (error) {
-        logger.error('Error deleting document files:', error);
+      } catch (embeddingError) {
+        logger.warn('Embedding generation failed — document still usable', {
+          documentId,
+          error: embeddingError.message,
+          component: 'documents-service'
+        });
+        await prisma.document.update({
+          where: { id: documentId },
+          data: { embeddingStatus: 'failed' }
+        });
       }
-    }, 0);
 
-    return {
-      filename: document.originalName
-    };
-  }
-
-  /**
-   * Reprocess document
-   */
-  async reprocessDocument(userId, documentId) {
-    const document = await prisma.document.findFirst({
-      where: { id: documentId, userId }
-    });
-
-    if (!document) {
-      throw new AppError('Document not found', 404);
-    }
-
-    if (document.status === 'PROCESSING') {
-      throw new AppError('Document is already being processed', 400);
-    }
-
-    // Reset document status and clear previous data
-    await prisma.document.update({
-      where: { id: documentId },
-      data: {
-        status: 'PENDING',
-        extractedText: null,
-        summary: null,
-        processingError: null,
-        processedAt: null
-      }
-    });
-
-    // Start processing
-    this.processDocumentAsync(documentId);
-
-    return {
-      status: 'PENDING',
-      message: 'Document reprocessing started'
-    };
-  }
-
-  /**
-   * Batch delete documents
-   */
-  async batchDeleteDocuments(userId, documentIds) {
-    // Verify all documents belong to user
-    const documents = await prisma.document.findMany({
-      where: {
-        id: { in: documentIds },
-        userId
-      },
-      include: {
-        images: true
-      }
-    });
-
-    if (documents.length !== documentIds.length) {
-      throw new AppError('Some documents not found or not accessible', 404);
-    }
-
-    // Delete in transaction
-    await prisma.$transaction(async (prisma) => {
-      // Delete related data
-      await prisma.sAPMetadata.deleteMany({
-        where: { documentId: { in: documentIds } }
+    } catch (error) {
+      logger.error('Document processing pipeline failed', {
+        documentId,
+        error: error.message,
+        stack: error.stack,
+        component: 'documents-service'
       });
 
-      await prisma.documentImage.deleteMany({
-        where: { documentId: { in: documentIds } }
-      });
-
-      await prisma.vectorEmbedding.deleteMany({
-        where: { documentId: { in: documentIds } }
-      });
-
-      // Delete documents
-      await prisma.document.deleteMany({
-        where: { id: { in: documentIds } }
-      });
-    });
-
-    // Delete physical files asynchronously
-    setTimeout(async () => {
-      for (const document of documents) {
-        try {
-          await deleteFileIfExists(document.filepath);
-          for (const image of document.images) {
-            await deleteFileIfExists(image.filepath);
-          }
-        } catch (error) {
-          logger.error('Error deleting document files:', error);
+      await prisma.document.update({
+        where: { id: documentId },
+        data: {
+          status: 'failed',
+          processingError: error.message
         }
-      }
-    }, 0);
-
-    return {
-      deletedCount: documents.length
-    };
+      }).catch(() => {}); // Don't throw if this update also fails
+    }
   }
 
-  /**
-   * Batch reprocess documents
-   */
-  async batchReprocessDocuments(userId, documentIds) {
-    // Verify all documents belong to user
-    const count = await prisma.document.count({
-      where: {
-        id: { in: documentIds },
-        userId
-      }
-    });
-
-    if (count !== documentIds.length) {
-      throw new AppError('Some documents not found or not accessible', 404);
+  async _deleteDocumentFiles(storagePath, documentId) {
+    // Delete the PDF
+    try {
+      await fs.unlink(storagePath);
+    } catch {
+      // Already gone — fine
     }
 
-    // Update all to pending
-    await prisma.document.updateMany({
-      where: { id: { in: documentIds } },
-      data: {
-        status: 'PENDING',
-        extractedText: null,
-        summary: null,
-        processingError: null,
-        processedAt: null
-      }
-    });
-
-    // Start processing each document
-    for (const documentId of documentIds) {
-      this.processDocumentAsync(documentId);
-    }
-
-    return {
-      processedCount: count
-    };
-  }
-
-  /**
-   * Batch update metadata
-   */
-  async batchUpdateMetadata(userId, documentIds, metadata) {
-    // Verify all documents belong to user
-    const count = await prisma.document.count({
-      where: {
-        id: { in: documentIds },
-        userId
-      }
-    });
-
-    if (count !== documentIds.length) {
-      throw new AppError('Some documents not found or not accessible', 404);
-    }
-
-    const updateData = {};
-    if (metadata.category !== undefined) updateData.category = metadata.category;
-    if (metadata.tags !== undefined) {
-      updateData.tags = Array.isArray(metadata.tags) ? metadata.tags : [metadata.tags];
-    }
-
-    if (Object.keys(updateData).length === 0) {
-      throw new AppError('No valid fields to update', 400);
-    }
-
-    await prisma.document.updateMany({
-      where: { id: { in: documentIds } },
-      data: updateData
-    });
-
-    return {
-      updatedCount: count
-    };
-  }
-
-  /**
-   * Generate document preview
-   */
-  async generatePreview(userId, documentId) {
-    const document = await prisma.document.findFirst({
-      where: { id: documentId, userId }
-    });
-
-    if (!document) {
-      throw new AppError('Document not found', 404);
-    }
-
-    // For now, return null - would implement thumbnail generation
-    return null;
-  }
-
-  /**
-   * Get document analysis
-   */
-  async getDocumentAnalysis(userId, documentId) {
-    const document = await prisma.document.findFirst({
-      where: { id: documentId, userId },
-      include: {
-        sapMetadata: true,
-        images: true
-      }
-    });
-
-    if (!document) {
-      throw new AppError('Document not found', 404);
-    }
-
-    if (document.status !== 'COMPLETED') {
-      return null;
-    }
-
-    // Basic analysis
-    const analysis = {
-      textLength: document.extractedText?.length || 0,
-      wordCount: document.extractedText ? document.extractedText.split(/\s+/).length : 0,
-      imageCount: document.images.length,
-      sapElements: {
-        tcodes: document.sapMetadata?.tcodes || [],
-        modules: document.sapMetadata?.modules || [],
-        errorCodes: document.sapMetadata?.errorCodes || [],
-        processes: document.sapMetadata?.processes || []
-      },
-      readingTime: Math.ceil((document.extractedText?.split(/\s+/).length || 0) / 200), // minutes
-      complexity: this.calculateComplexity(document.extractedText || ''),
-      lastAnalyzed: document.processedAt
-    };
-
-    return analysis;
-  }
-
-  /**
-   * Analyze document (re-run analysis)
-   */
-  async analyzeDocument(userId, documentId) {
-    // For now, just return the existing analysis
-    return await this.getDocumentAnalysis(userId, documentId);
-  }
-
-  /**
-   * Calculate text complexity score
-   */
-  calculateComplexity(text) {
-    if (!text) return 0;
-
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const words = text.split(/\s+/);
-    const avgWordsPerSentence = words.length / sentences.length;
-
-    // Simple complexity based on average sentence length
-    if (avgWordsPerSentence > 20) return 'high';
-    if (avgWordsPerSentence > 12) return 'medium';
-    return 'low';
-  }
-
-  /**
-   * Get user's T-Codes
-   */
-  async getUserTCodes(userId) {
-    const metadata = await prisma.sAPMetadata.findMany({
-      where: {
-        document: { userId }
-      },
-      select: {
-        tcodes: true
-      }
-    });
-
-    const tcodes = new Set();
-    metadata.forEach(m => {
-      m.tcodes.forEach(tcode => tcodes.add(tcode));
-    });
-
-    return Array.from(tcodes).sort();
-  }
-
-  /**
-   * Get user's SAP modules
-   */
-  async getUserModules(userId) {
-    const metadata = await prisma.sAPMetadata.findMany({
-      where: {
-        document: { userId }
-      },
-      select: {
-        modules: true
-      }
-    });
-
-    const modules = new Set();
-    metadata.forEach(m => {
-      m.modules.forEach(module => modules.add(module));
-    });
-
-    return Array.from(modules).sort();
+    // Delete the rendered page images folder
+    await imageExtractor.deleteDocumentImages(documentId);
   }
 }
 

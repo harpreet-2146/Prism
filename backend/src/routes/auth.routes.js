@@ -1,73 +1,37 @@
+// backend/src/routes/auth.routes.js
+'use strict';
+
 const express = require('express');
 const authController = require('../controllers/auth.controller');
-const { 
-  validateRegistration, 
-  validateLogin, 
-  validateChangePassword 
-} = require('../middleware/validation.middleware');
-const { 
-  authenticateToken, 
-  refreshTokenIfNeeded,
-  userRateLimit 
-} = require('../middleware/auth.middleware');
+const { verifyToken } = require('../middleware/auth.middleware');
+const { validateBody, schemas } = require('../middleware/validation.middleware');
+const { auth: authRateLimit } = require('../middleware/rate-limit.middleware');
 
 const router = express.Router();
 
-// Public routes (no authentication required)
-router.post('/register', 
-  userRateLimit(5, 15 * 60 * 1000), // 5 registration attempts per 15 minutes
-  validateRegistration, 
+// Public routes (no auth required)
+router.post('/register',
+  authRateLimit,
+  validateBody(schemas.register),
   authController.register
 );
 
-router.post('/login', 
-  userRateLimit(10, 15 * 60 * 1000), // 10 login attempts per 15 minutes
-  validateLogin, 
+router.post('/login',
+  authRateLimit,
+  validateBody(schemas.login),
   authController.login
 );
 
-router.post('/refresh', 
-  userRateLimit(20, 15 * 60 * 1000), // 20 refresh attempts per 15 minutes
-  authController.refreshToken
+router.post('/refresh',
+  validateBody(schemas.refreshToken),
+  authController.refresh
 );
 
-router.post('/forgot-password', 
-  userRateLimit(3, 60 * 60 * 1000), // 3 attempts per hour
-  authController.forgotPassword
-);
-
-router.post('/reset-password', 
-  userRateLimit(5, 60 * 60 * 1000), // 5 attempts per hour
-  authController.resetPassword
-);
-
-// Protected routes (authentication required)
-router.use(authenticateToken);
-router.use(refreshTokenIfNeeded);
-
-router.post('/logout', authController.logout);
-
-router.get('/profile', authController.getProfile);
-
-router.put('/profile', authController.updateProfile);
-
-router.put('/change-password', 
-  validateChangePassword, 
-  authController.changePassword
-);
-
-router.delete('/account', 
-  userRateLimit(2, 24 * 60 * 60 * 1000), // 2 attempts per day
-  authController.deleteAccount
-);
-
-// Get user's active sessions
-router.get('/sessions', authController.getSessions);
-
-// Revoke specific session
-router.delete('/sessions/:sessionId', authController.revokeSession);
-
-// Revoke all other sessions (keep current)
-router.delete('/sessions', authController.revokeAllSessions);
+// Protected routes
+router.post('/logout',           verifyToken, authController.logout);
+router.get('/me',                verifyToken, authController.getMe);
+router.patch('/profile',         verifyToken, validateBody(schemas.updateProfile),  authController.updateProfile);
+router.post('/change-password',  verifyToken, validateBody(schemas.changePassword), authController.changePassword);
+router.delete('/account',        verifyToken, validateBody(schemas.deleteAccount),  authController.deleteAccount);
 
 module.exports = router;
