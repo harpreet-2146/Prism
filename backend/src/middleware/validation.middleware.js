@@ -79,11 +79,19 @@ const schemas = {
     id: z.string().uuid('Invalid ID format')
   }),
 
-  register: z.object({
-    email: z.string().email('Invalid email address').max(255),
-    password: z.string().min(8, 'Password must be at least 8 characters').max(128),
-    fullName: z.string().min(1).max(100).optional()
-  }),
+  // NEW - Accept BOTH "name" and "fullName" for compatibility
+register: z.object({
+  email: z.string().email('Invalid email address').max(255),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(128),
+  name: z.string().min(1, 'Name is required').max(100)
+    .transform(v => v.trim())  // Clean whitespace
+    .optional(),
+  fullName: z.string().min(1).max(100).optional()
+}).refine(
+  // At least one name field must be provided
+  (data) => data.name || data.fullName,
+  { message: 'Name is required', path: ['name'] }
+),
 
   login: z.object({
     email: z.string().email('Invalid email address'),
