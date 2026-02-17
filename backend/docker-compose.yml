@@ -1,0 +1,274 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: prism-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: prism_db
+      POSTGRES_USER: prism_user
+      POSTGRES_PASSWORD: prism_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - prism-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prism_user -d prism_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for session storage and caching
+  redis:
+    image: redis:7-alpine
+    container_name: prism-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - prism-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Milvus Vector Database (Optional)
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: prism-milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - prism-network
+    profiles:
+      - vector
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: prism-milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - prism-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    profiles:
+      - vector
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.3.0
+    container_name: prism-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - milvus-etcd
+      - milvus-minio
+    networks:
+      - prism-network
+    profiles:
+      - vector
+
+  # PRISM Backend API
+  prism-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prism-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://prism_user:prism_password@postgres:5432/prism_db
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-your-super-secret-refresh-key-change-in-production}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY}
+      GOOGLE_AI_PROJECT_ID: ${GOOGLE_AI_PROJECT_ID}
+      MILVUS_ADDRESS: milvus-standalone:19530
+      UPLOAD_MAX_SIZE: 52428800
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3001}
+      VECTOR_DB_ENABLED: ${VECTOR_DB_ENABLED:-false}
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads_data:/app/uploads
+      - exports_data:/app/exports
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - prism-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Background Jobs Worker
+  prism-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prism-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://prism_user:prism_password@postgres:5432/prism_db
+      REDIS_URL: redis://redis:6379
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY}
+      WORKER_MODE: "true"
+    volumes:
+      - uploads_data:/app/uploads
+      - exports_data:/app/exports
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "src/worker.js"]
+    networks:
+      - prism-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: prism-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - uploads_data:/var/www/uploads:ro
+      - exports_data:/var/www/exports:ro
+    depends_on:
+      - prism-backend
+    networks:
+      - prism-network
+
+  # Optional: Database Backup Service
+  postgres-backup:
+    image: postgres:15-alpine
+    container_name: prism-backup
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: prism_password
+    volumes:
+      - backup_data:/backups
+      - ./backup-script.sh:/usr/local/bin/backup-script.sh:ro
+    command: >
+      sh -c "chmod +x /usr/local/bin/backup-script.sh && 
+             while true; do 
+               /usr/local/bin/backup-script.sh; 
+               sleep 86400; 
+             done"
+    depends_on:
+      - postgres
+    networks:
+      - prism-network
+    profiles:
+      - backup
+
+  # Optional: Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus
+    container_name: prism-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - prism-network
+    profiles:
+      - monitoring
+
+  # Optional: Grafana Dashboard
+  grafana:
+    image: grafana/grafana
+    container_name: prism-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - prism-network
+    profiles:
+      - monitoring
+
+networks:
+  prism-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  milvus_data:
+    driver: local
+  etcd_data:
+    driver: local
+  minio_data:
+    driver: local
+  uploads_data:
+    driver: local
+  exports_data:
+    driver: local
+  backup_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
