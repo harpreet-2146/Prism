@@ -1,0 +1,68 @@
+[build]
+builder = "nixpacks"
+buildCommand = "npm install && npx prisma generate && npx prisma migrate deploy"
+
+[deploy]
+startCommand = "node src/server.js"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "on-failure"
+restartPolicyMaxRetries = 3
+```
+
+---
+
+## Complete Final File Map
+
+Here's everything you need — mark each one as done as you copy it:
+```
+backend/
+├── .env.example                          ✅ Batch 1
+├── .gitignore                            ✅ This batch
+├── package.json                          ✅ Batch 1
+├── railway.toml                          ✅ This batch
+├── prisma/
+│   ├── schema.prisma                     ✅ Updated after Batch 1
+│   └── seed.js                           ✅ This batch
+└── src/
+    ├── server.js                         ✅ Batch 4
+    ├── config/
+    │   └── index.js                      ✅ Batch 1
+    ├── controllers/
+    │   ├── auth.controller.js            ✅ This batch
+    │   ├── chat.controller.js            ✅ Batch 3
+    │   ├── documents.controller.js       ✅ This batch
+    │   └── export.controller.js          ✅ This batch
+    ├── middleware/
+    │   ├── auth.middleware.js            ✅ Batch 3
+    │   ├── error.middleware.js           ✅ Batch 4
+    │   ├── rate-limit.middleware.js      ✅ Batch 4
+    │   ├── upload.middleware.js          ✅ Batch 4
+    │   └── validation.middleware.js      ✅ Batch 4
+    ├── routes/
+    │   ├── index.js                      ✅ Batch 4
+    │   ├── auth.routes.js                ✅ This batch
+    │   ├── chat.routes.js                ✅ This batch
+    │   ├── documents.routes.js           ✅ This batch
+    │   └── export.routes.js              ✅ This batch
+    ├── services/
+    │   ├── auth.service.js               ✅ Batch 2
+    │   ├── chat.service.js               ✅ Batch 3
+    │   ├── documents.service.js          ✅ Batch 4
+    │   ├── ai/
+    │   │   ├── embedding.service.js      ✅ Batch 2
+    │   │   ├── groq.service.js           ✅ Batch 3
+    │   │   └── imagegen.service.js       ✅ Batch 3
+    │   ├── export/
+    │   │   ├── docx-export.service.js    ✅ This batch
+    │   │   └── pdf-export.service.js     ✅ This batch
+    │   ├── pdf/
+    │   │   ├── image-extractor.service.js ✅ Batch 2
+    │   │   └── pdf-processor.service.js  ✅ Batch 2
+    │   └── vector/
+    │       └── embedding-search.service.js ✅ Batch 2
+    └── utils/
+        ├── helpers.js                    ✅ Batch 4
+        ├── logger.js                     ✅ Batch 4
+        ├── prisma.js                     ✅ Batch 1
+        └── validation.js                 ✅ Batch 4
