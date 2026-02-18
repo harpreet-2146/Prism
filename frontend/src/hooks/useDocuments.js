@@ -1,72 +1,69 @@
-import { useState, useCallback } from 'react';
-import { documentsAPI } from '@lib/api';
+import { useState, useEffect } from 'react';
+import { documentsAPI } from '../lib/api';
 
-export function useDocuments() {
+export const useDocuments = () => {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
-  // Fetch all documents
-  const fetchDocuments = useCallback(async () => {
+  const fetchDocuments = async () => {
     try {
       setLoading(true);
-      const { data } = await documentsAPI.getAll();
-      setDocuments(data.documents || []);
+      const response = await documentsAPI.list();
+      const docs = response.data?.data?.documents || response.data?.documents || [];
+      setDocuments(docs);
     } catch (error) {
       console.error('Failed to fetch documents:', error);
-      throw error;
+      setDocuments([]);
     } finally {
       setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    fetchDocuments();
   }, []);
 
-  // Upload document
-  const uploadDocument = useCallback(async file => {
+  const uploadDocument = async (file) => {
     try {
       setUploading(true);
       setUploadProgress(0);
 
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('document', file);
 
-      const { data } = await documentsAPI.upload(formData);
+      const response = await documentsAPI.upload(
+        formData,
+        (progress) => setUploadProgress(progress)
+      );
 
-      // Add to list
-      setDocuments(prev => [data.document, ...prev]);
-      setUploadProgress(100);
+      console.log('Upload response:', response.data);
 
-      return data.document;
-    } catch (error) {
-      console.error('Failed to upload document:', error);
-      throw error;
-    } finally {
+      // Force immediate refresh
+      await fetchDocuments();
+
+      setUploadProgress(0);
       setUploading(false);
-      setTimeout(() => setUploadProgress(0), 1000);
-    }
-  }, []);
 
-  // Delete document
-  const deleteDocument = useCallback(async documentId => {
+      return response.data;
+    } catch (error) {
+      console.error('Upload failed:', error);
+      setUploadProgress(0);
+      setUploading(false);
+      throw error;
+    }
+  };
+
+  const deleteDocument = async (documentId) => {
     try {
       await documentsAPI.delete(documentId);
       setDocuments(prev => prev.filter(doc => doc.id !== documentId));
     } catch (error) {
-      console.error('Failed to delete document:', error);
+      console.error('Delete failed:', error);
       throw error;
     }
-  }, []);
-
-  // Get document preview
-  const getDocumentPreview = useCallback(async documentId => {
-    try {
-      const { data } = await documentsAPI.getPreview(documentId);
-      return data.preview;
-    } catch (error) {
-      console.error('Failed to get document preview:', error);
-      throw error;
-    }
-  }, []);
+  };
 
   return {
     documents,
@@ -75,7 +72,6 @@ export function useDocuments() {
     uploadProgress,
     fetchDocuments,
     uploadDocument,
-    deleteDocument,
-    getDocumentPreview
+    deleteDocument
   };
-}
+};
