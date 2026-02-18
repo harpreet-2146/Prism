@@ -3,7 +3,8 @@
 
 const path = require('path');
 const fs = require('fs');
-const prisma = require('../utils/prisma');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 const pdfExportService = require('../services/export/pdf-export.service');
 const docxExportService = require('../services/export/docx-export.service');
 const chatService = require('../services/chat.service');
@@ -11,17 +12,21 @@ const config = require('../config');
 const { logger } = require('../utils/logger');
 
 class ExportController {
-  // ----------------------------------------------------------------
-  // EXPORT AS PDF — POST /api/export/pdf
-  // ----------------------------------------------------------------
-
   exportPDF = async (req, res) => {
     const { conversationId } = req.body;
     const userId = req.user.id;
 
     try {
       const conversation = await chatService.getConversation(conversationId, userId);
-      const messages = await chatService.getMessages(conversationId);
+      
+      if (!conversation) {
+        return res.status(404).json({
+          success: false,
+          error: 'Conversation not found'
+        });
+      }
+
+      const messages = conversation.messages || [];
 
       if (messages.length === 0) {
         return res.status(400).json({
@@ -51,17 +56,21 @@ class ExportController {
     }
   };
 
-  // ----------------------------------------------------------------
-  // EXPORT AS DOCX — POST /api/export/docx
-  // ----------------------------------------------------------------
-
   exportDOCX = async (req, res) => {
     const { conversationId } = req.body;
     const userId = req.user.id;
 
     try {
       const conversation = await chatService.getConversation(conversationId, userId);
-      const messages = await chatService.getMessages(conversationId);
+
+      if (!conversation) {
+        return res.status(404).json({
+          success: false,
+          error: 'Conversation not found'
+        });
+      }
+
+      const messages = conversation.messages || [];
 
       if (messages.length === 0) {
         return res.status(400).json({
@@ -92,14 +101,9 @@ class ExportController {
     }
   };
 
-  // ----------------------------------------------------------------
-  // DOWNLOAD — GET /api/export/download/:filename
-  // ----------------------------------------------------------------
-
   download = async (req, res) => {
     const { filename } = req.params;
 
-    // Security: prevent path traversal
     const safe = path.basename(filename);
     if (safe !== filename || (!safe.endsWith('.pdf') && !safe.endsWith('.docx'))) {
       return res.status(400).json({ success: false, error: 'Invalid filename' });
