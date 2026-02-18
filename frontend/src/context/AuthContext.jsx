@@ -41,53 +41,59 @@ export function AuthProvider({ children }) {
   }, []);
 
   // Login function
-  const login = useCallback(async (email, password) => {
-    try {
-      const { data } = await authAPI.login({ email, password });
+ // Login function
+const login = useCallback(async (email, password) => {
+  try {
+    const { data } = await authAPI.login({ email, password });
 
-      // Save tokens
-      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, data.accessToken);
-      localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, data.refreshToken);
-      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.user));
+    // ✅ FIX: Access nested data object
+    const { user, accessToken, refreshToken } = data.data;
 
-      // Update state
-      setUser(data.user);
-      setIsAuthenticated(true);
+    // Save tokens
+    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, accessToken);
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
 
-      return { success: true };
-    } catch (error) {
-      console.error('Login failed:', error);
-      return {
-        success: false,
-        error: error.response?.data?.message || 'Login failed'
-      };
-    }
-  }, []);
+    // Update state
+    setUser(user);
+    setIsAuthenticated(true);
+
+    return { success: true };
+  } catch (error) {
+    console.error('Login failed:', error);
+    return {
+      success: false,
+      error: error.response?.data?.error || error.response?.data?.message || 'Login failed'
+    };
+  }
+}, []);
 
   // Register function
   const register = useCallback(async (name, email, password) => {
-    try {
-      const { data } = await authAPI.register({ name, email, password });
+  try {
+    const { data } = await authAPI.register({ name, email, password });
 
-      // Save tokens
-      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, data.accessToken);
-      localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, data.refreshToken);
-      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.user));
+    // ✅ FIX: Access nested data object
+    const { user, accessToken, refreshToken } = data.data;
 
-      // Update state
-      setUser(data.user);
-      setIsAuthenticated(true);
+    // Save tokens
+    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, accessToken);
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
 
-      return { success: true };
-    } catch (error) {
-      console.error('Registration failed:', error);
-      return {
-        success: false,
-        error: error.response?.data?.message || 'Registration failed'
-      };
-    }
-  }, []);
+    // Update state
+    setUser(user);
+    setIsAuthenticated(true);
 
+    return { success: true };
+  } catch (error) {
+    console.error('Registration failed:', error);
+    return {
+      success: false,
+      error: error.response?.data?.error || error.response?.data?.message || 'Registration failed'
+    };
+  }
+}, []);
   // Logout function
   const logout = useCallback(async () => {
     try {
