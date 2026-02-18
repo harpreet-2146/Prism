@@ -118,7 +118,8 @@ class ChatController {
         messageId: savedMessage.id,
         conversationId: conversation.id,
         parsed,
-        sources
+        sources,
+        images:images
       });
 
     } catch (error) {
