@@ -1,66 +1,32 @@
-import { useState, useRef } from 'react';
-import { useDocuments } from '@hooks/useDocuments';
-import { Button } from '@components/ui/button';
-import { Card } from '@components/ui/card';
-import { Upload, FileText, X, AlertCircle } from 'lucide-react';
-import { cn, formatFileSize, isValidFileType, isValidFileSize } from '@lib/utils';
-import {
-  MAX_FILE_SIZE_MB,
-  ACCEPTED_FILE_TYPES,
-  ERROR_MESSAGES,
-  SUCCESS_MESSAGES
-} from '@lib/constants';
+// frontend/src/components/documents/DocumentUpload.jsx
+
+import React, { useState, useRef } from 'react';
+import { Upload, FileText, X } from 'lucide-react';
 import UploadProgress from './UploadProgress';
 
-export default function DocumentUpload() {
-  const { uploadDocument, uploading, uploadProgress } = useDocuments();
-  const [dragActive, setDragActive] = useState(false);
+const DocumentUpload = ({ onUploadComplete, onUploadError }) => {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [error, setError] = useState('');
-  const inputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const fileInputRef = useRef(null);
+  const eventSourceRef = useRef(null);
 
-  const handleDrag = e => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
-  };
-
-  const validateFile = file => {
-    if (!isValidFileType(file, ACCEPTED_FILE_TYPES)) {
-      setError(ERROR_MESSAGES.INVALID_FILE_TYPE);
-      return false;
-    }
-
-    if (!isValidFileSize(file, MAX_FILE_SIZE_MB)) {
-      setError(ERROR_MESSAGES.FILE_TOO_LARGE);
-      return false;
-    }
-
-    return true;
-  };
-
-  const handleDrop = e => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    setError('');
-
-    const file = e.dataTransfer.files?.[0];
-    if (file && validateFile(file)) {
-      setSelectedFile(file);
-    }
-  };
-
-  const handleChange = e => {
-    e.preventDefault();
-    setError('');
-
+  const handleFileSelect = (e) => {
     const file = e.target.files?.[0];
-    if (file && validateFile(file)) {
+    if (file) {
+      // Validate file type
+      if (file.type !== 'application/pdf') {
+        alert('Please select a PDF file');
+        return;
+      }
+
+      // Validate file size (50MB max)
+      const maxSizeMB = 50;
+      if (file.size > maxSizeMB * 1024 * 1024) {
+        alert(`File size must be less than ${maxSizeMB}MB`);
+        return;
+      }
+
       setSelectedFile(file);
     }
   };
@@ -68,101 +34,162 @@ export default function DocumentUpload() {
   const handleUpload = async () => {
     if (!selectedFile) return;
 
+    setUploading(true);
+    setUploadProgress({
+      progress: 0,
+      stage: 'uploading',
+      status: 'processing'
+    });
+
     try {
-      await uploadDocument(selectedFile);
-      setSelectedFile(null);
-      setError('');
-      if (inputRef.current) {
-        inputRef.current.value = '';
+      const { useDocuments } = await import('../../hooks/useDocuments');
+      const { uploadDocument } = useDocuments();
+
+      const { eventSource } = await uploadDocument(selectedFile, (progressData) => {
+        setUploadProgress(progressData);
+      });
+
+      eventSourceRef.current = eventSource;
+
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploading(false);
+      setUploadProgress(null);
+      
+      if (onUploadError) {
+        onUploadError(error);
       }
-    } catch (err) {
-      setError(ERROR_MESSAGES.UPLOAD_FAILED);
     }
   };
 
   const handleCancel = () => {
+    // Close SSE connection if active
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
     setSelectedFile(null);
-    setError('');
-    if (inputRef.current) {
-      inputRef.current.value = '';
+    setUploading(false);
+    setUploadProgress(null);
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type === 'application/pdf') {
+      setSelectedFile(file);
+    } else {
+      alert('Please drop a PDF file');
+    }
+  };
+
+  // Handle upload complete from progress component
+  React.useEffect(() => {
+    if (uploadProgress?.type === 'done') {
+      setUploading(false);
+      setSelectedFile(null);
+      setUploadProgress(null);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+
+      if (onUploadComplete) {
+        onUploadComplete();
+      }
+    }
+  }, [uploadProgress, onUploadComplete]);
+
   return (
-    <Card className="p-6">
-      <div className="space-y-4">
-        {/* Drag and drop area */}
+    <div className="w-full">
+      {!uploading ? (
         <div
-          onDragEnter={handleDrag}
-          onDragLeave={handleDrag}
-          onDragOver={handleDrag}
+          className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors cursor-pointer"
+          onDragOver={handleDragOver}
           onDrop={handleDrop}
-          className={cn(
-            'relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-12 transition-colors',
-            dragActive ? 'border-primary bg-primary/5' : 'border-border',
-            selectedFile && 'border-primary bg-primary/5'
-          )}
+          onClick={() => fileInputRef.current?.click()}
         >
           <input
-            ref={inputRef}
+            ref={fileInputRef}
             type="file"
+            accept=".pdf"
+            onChange={handleFileSelect}
             className="hidden"
-            accept={ACCEPTED_FILE_TYPES.join(',')}
-            onChange={handleChange}
-            disabled={uploading}
           />
 
-          {selectedFile ? (
-            // Selected file preview
-            <div className="flex w-full items-center justify-between">
-              <div className="flex items-center gap-3">
-                <FileText className="h-10 w-10 text-primary" />
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center">
+              <Upload className="w-8 h-8 text-blue-600" />
+            </div>
+
+            {selectedFile ? (
+              <div className="flex items-center gap-3 bg-gray-50 px-4 py-3 rounded-lg">
+                <FileText className="w-5 h-5 text-gray-600" />
+                <span className="text-sm font-medium text-gray-700">
+                  {selectedFile.name}
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedFile(null);
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = '';
+                    }
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <>
                 <div>
-                  <p className="font-medium">{selectedFile.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {formatFileSize(selectedFile.size)}
+                  <p className="text-lg font-medium text-gray-700 mb-1">
+                    Drop your SAP PDF here
+                  </p>
+                  <p className="text-sm text-gray-500">
+                    or click to browse
                   </p>
                 </div>
-              </div>
-              {!uploading && (
-                <Button variant="ghost" size="icon" onClick={handleCancel}>
-                  <X className="h-4 w-4" />
-                </Button>
-              )}
-            </div>
-          ) : (
-            // Upload prompt
-            <>
-              <Upload className="mb-4 h-12 w-12 text-muted-foreground" />
-              <p className="mb-2 text-lg font-medium">Drop your PDF here</p>
-              <p className="mb-4 text-sm text-muted-foreground">
-                or click to browse (max {MAX_FILE_SIZE_MB}MB)
-              </p>
-              <Button onClick={() => inputRef.current?.click()} disabled={uploading}>
-                Select File
-              </Button>
-            </>
-          )}
-        </div>
+                <p className="text-xs text-gray-400">
+                  Maximum file size: 50MB
+                </p>
+              </>
+            )}
 
-        {/* Error message */}
-        {error && (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            <span>{error}</span>
+            {selectedFile && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleUpload();
+                }}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Upload & Process
+              </button>
+            )}
           </div>
-        )}
-
-        {/* Upload progress */}
-        {uploading && <UploadProgress progress={uploadProgress} filename={selectedFile?.name} />}
-
-        {/* Upload button */}
-        {selectedFile && !uploading && (
-          <Button onClick={handleUpload} className="w-full" size="lg">
-            Upload Document
-          </Button>
-        )}
-      </div>
-    </Card>
+        </div>
+      ) : (
+        <UploadProgress
+          progress={uploadProgress}
+          onCancel={handleCancel}
+        />
+      )}
+    </div>
   );
-}
+};
+
+export default DocumentUpload;
