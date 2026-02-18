@@ -329,35 +329,46 @@ class AuthService {
   // ----------------------------------------------------------------
 
   async _generateTokens(userId) {
-    const accessToken = jwt.sign(
-      { userId, type: 'access' },
-      config.JWT_SECRET,
-      {
-        expiresIn: config.JWT_ACCESS_EXPIRES_IN,
-        issuer: 'prism-api',
-        audience: 'prism-app'
-      }
-    );
+  const accessToken = jwt.sign(
+    { userId, type: 'access' },
+    config.JWT_SECRET,
+    {
+      expiresIn: config.JWT_ACCESS_EXPIRES_IN,
+      issuer: 'prism-api',
+      audience: 'prism-app'
+    }
+  );
 
-    const refreshToken = jwt.sign(
-      { userId, type: 'refresh' },
-      config.JWT_REFRESH_SECRET,
-      {
-        expiresIn: config.JWT_REFRESH_EXPIRES_IN,
-        issuer: 'prism-api',
-        audience: 'prism-app'
-      }
-    );
+  const refreshToken = jwt.sign(
+    { userId, type: 'refresh' },
+    config.JWT_REFRESH_SECRET,
+    {
+      expiresIn: config.JWT_REFRESH_EXPIRES_IN,
+      issuer: 'prism-api',
+      audience: 'prism-app'
+    }
+  );
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+  // 🔍 DEBUG: Log token details
+  logger.info('✅ Tokens generated', {
+    userId,
+    accessTokenLength: accessToken.length,
+    refreshTokenLength: refreshToken.length,
+    accessTokenPreview: accessToken.substring(0, 50) + '...',
+    JWT_SECRET_length: config.JWT_SECRET?.length,
+    JWT_REFRESH_SECRET_length: config.JWT_REFRESH_SECRET?.length,
+    component: 'auth-service'
+  });
 
-    await prisma.refreshToken.create({
-      data: { userId, token: refreshToken, expiresAt }
-    });
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 7);
 
-    return { accessToken, refreshToken };
-  }
+  await prisma.refreshToken.create({
+    data: { userId, token: refreshToken, expiresAt }
+  });
+
+  return { accessToken, refreshToken };
+}
 
   /** Strip sensitive fields before sending to client */
   _safeUser(user) {
