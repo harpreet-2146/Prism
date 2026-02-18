@@ -64,9 +64,43 @@ class AuthController {
   };
 
   getMe = async (req, res) => {
-    // req.user is already set by auth middleware
-    res.json({ success: true, data: { user: req.user } });
-  };
+  try {
+    const { PrismaClient } = require('@prisma/client');
+    const prisma = new PrismaClient();
+    
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        createdAt: true,
+        updatedAt: true
+      }
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      data: user
+    });
+  } catch (error) {
+    logger.error('Failed to get user profile', {
+      error: error.message,
+      component: 'auth-controller'
+    });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get user profile'
+    });
+  }
+};
 
   updateProfile = async (req, res) => {
     try {
