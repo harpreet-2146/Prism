@@ -79,6 +79,8 @@ class ChatController {
       // 7. Parse the JSON response from Groq
       const parsed = chatService.parseAIResponse(fullContent);
 
+      // Find this section around line 70-90 and replace:
+
       // 8. Build sources from context chunks
       const sources = context.map(c => ({
         type: 'document',
@@ -86,6 +88,9 @@ class ChatController {
         title: c.documentName,
         pageNumber: c.pageNumber
       }));
+
+      // ✅ FIXED: Get actual images instead of hardcoding null
+      const images = await chatService.getRelevantImages(context);
 
       // 9. Save assistant message with structured data
       const savedMessage = await chatService.saveMessage(
@@ -95,7 +100,7 @@ class ChatController {
         {
           sources,
           steps: parsed.steps,
-          images: null // images attached by frontend from document images
+          images // ✅ FIXED: Use actual images from PDFs
         }
       );
 
