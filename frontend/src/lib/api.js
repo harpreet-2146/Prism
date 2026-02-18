@@ -1,16 +1,24 @@
+// frontend/src/lib/api.js
+
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+
+// ================================================================
+// AXIOS INSTANCE
+// ================================================================
 
 const api = axios.create({
-  baseURL: API_URL,
-  timeout: 30000,
+  baseURL: API_BASE_URL,
   headers: {
-    'Content-Type': 'application/json'
-  }
+    'Content-Type': 'application/json',
+  },
 });
 
-// Request interceptor
+// ================================================================
+// REQUEST INTERCEPTOR - Attach access token
+// ================================================================
+
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('accessToken');
@@ -19,33 +27,48 @@ api.interceptors.request.use(
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    return Promise.reject(error);
+  }
 );
 
-// Response interceptor
+// ================================================================
+// RESPONSE INTERCEPTOR - Handle token refresh
+// ================================================================
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
+    // If 401 and not already retrying, attempt token refresh
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
+      const refreshToken = localStorage.getItem('refreshToken');
+      if (!refreshToken) {
+        // No refresh token, redirect to login
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
+        window.location.href = '/login';
+        return Promise.reject(error);
+      }
+
       try {
-        const refreshToken = localStorage.getItem('refreshToken');
-        const response = await axios.post(`${API_URL}/auth/refresh`, {
-          refreshToken
+        const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
+          refreshToken,
         });
 
-        const { accessToken } = response.data;
+        const { accessToken } = response.data.data;
         localStorage.setItem('accessToken', accessToken);
 
+        // Retry original request with new token
         originalRequest.headers.Authorization = `Bearer ${accessToken}`;
         return api(originalRequest);
       } catch (refreshError) {
+        // Refresh failed, logout
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
-        localStorage.removeItem('user');
         window.location.href = '/login';
         return Promise.reject(refreshError);
       }
@@ -55,146 +78,168 @@ api.interceptors.response.use(
   }
 );
 
-// Auth API
+// ================================================================
+// AUTH API
+// ================================================================
+
 export const authAPI = {
   register: (data) => api.post('/auth/register', data),
   login: (data) => api.post('/auth/login', data),
-  logout: () => api.post('/auth/logout'),
-  getProfile: () => api.get('/auth/me'),
-  refreshToken: (refreshToken) => api.post('/auth/refresh', { refreshToken })
+  logout: (refreshToken) => api.post('/auth/logout', { refreshToken }),
+  refresh: (refreshToken) => api.post('/auth/refresh', { refreshToken }),
+  me: () => api.get('/auth/me'),
 };
 
-// Documents API - PRESERVED YOUR WORKING CODE
+// ================================================================
+// DOCUMENTS API
+// ================================================================
+
 export const documentsAPI = {
-  list: (params) => api.get('/documents', { params }),
-  
-  upload: (formData, onUploadProgress) => {
-    return api.post('/documents', formData, {
+  // Upload document with progress tracking
+  upload: (file, onUploadProgress) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    return api.post('/documents/upload', formData, {
       headers: {
-        'Content-Type': 'multipart/form-data'
+        'Content-Type': 'multipart/form-data',
       },
-      onUploadProgress: (progressEvent) => {
-        if (onUploadProgress && progressEvent.total) {
-          const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          onUploadProgress(progress);
-        }
-      },
-      timeout: 300000 // 5 minutes for large files
+      onUploadProgress,
     });
   },
-  
-  delete: (documentId) => api.delete(`/documents/${documentId}`),
-  getById: (documentId) => api.get(`/documents/${documentId}`),
-  getImages: (documentId) => api.get(`/documents/${documentId}/images`)
-};
 
-// Conversations API - ADDED getAll() ALIAS FOR ChatContext
-export const conversationsAPI = {
-  // Primary method for ChatContext
-  getAll: (params) => api.get('/chat/conversations', { params }),
-  // Kept for backward compatibility
-  list: (params) => api.get('/chat/conversations', { params }),
-  getById: (conversationId) => api.get(`/chat/conversations/${conversationId}`),
-  create: () => api.post('/chat/conversations'),
-  delete: (conversationId) => api.delete(`/chat/conversations/${conversationId}`),
-  updateTitle: (conversationId, title) => 
-    api.patch(`/chat/conversations/${conversationId}/title`, { title })
-};
+  // Get all user documents
+  getAll: () => api.get('/documents'),
 
-// Chat API - COMPLETELY REWRITTEN FOR PROPER SSE STREAMING
-export const chatAPI = {
-  /**
-   * Send message with Server-Sent Events streaming
-   * This properly handles the SSE stream from your backend's /chat/stream endpoint
-   * 
-   * @param {Object} payload - { message, conversationId }
-   * @param {Function} onChunk - Called for each content chunk: (data) => {}
-   * @param {Function} onComplete - Called when streaming completes: (data) => {}
-   * @param {Function} onError - Called on error: (error) => {}
-   */
-  streamMessage: async (payload, onChunk, onComplete, onError) => {
+  // Get document by ID
+  getById: (id) => api.get(`/documents/${id}`),
+
+  // Delete document
+  delete: (id) => api.delete(`/documents/${id}`),
+
+  // Get document processing status with SSE (Server-Sent Events)
+  streamStatus: (documentId, onProgress, onComplete, onError) => {
     const token = localStorage.getItem('accessToken');
-    
-    try {
-      const response = await fetch(`${API_URL}/chat/stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
+    const url = `${API_BASE_URL}/documents/${documentId}/status`;
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+    const eventSource = new EventSource(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) break;
-
-        // Decode the chunk and add to buffer
-        buffer += decoder.decode(value, { stream: true });
-        
-        // Split by newlines to handle multiple SSE events
-        const lines = buffer.split('\n');
-        
-        // Keep the last incomplete line in buffer
-        buffer = lines.pop() || '';
-
-        // Process complete lines
-        for (const line of lines) {
-          // SSE format: "data: {...}\n"
-          if (line.startsWith('data: ')) {
-            try {
-              const jsonData = line.slice(6); // Remove "data: " prefix
-              
-              // Skip heartbeat comments (": heartbeat")
-              if (!jsonData.trim() || jsonData.startsWith(':')) continue;
-              
-              const data = JSON.parse(jsonData);
-              
-              // Handle different event types from backend
-              if (data.type === 'chunk' && data.content) {
-                onChunk(data);
-              } else if (data.type === 'done') {
-                onComplete(data);
-              } else if (data.type === 'error') {
-                onError(new Error(data.message || 'Stream error'));
-              }
-            } catch (parseError) {
-              console.warn('Failed to parse SSE data:', line.substring(0, 100), parseError);
-            }
-          }
+        if (data.type === 'progress') {
+          onProgress(data);
+        } else if (data.type === 'done') {
+          onComplete(data);
+          eventSource.close();
+        } else if (data.type === 'error') {
+          onError(data);
+          eventSource.close();
         }
+      } catch (error) {
+        console.error('Failed to parse SSE data:', error);
       }
-    } catch (error) {
-      console.error('Stream connection error:', error);
-      onError(error);
-    }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('SSE error:', error);
+      onError({ error: 'Connection lost' });
+      eventSource.close();
+    };
+
+    return eventSource; // Return for manual cleanup if needed
   },
 
-  /**
-   * Send message without streaming (fallback)
-   * @param {Object} payload - { message, conversationId }
-   */
-  sendMessage: (payload) => api.post('/chat/message', payload)
+  // Get image URL
+  getImageUrl: (documentId, pageNumber) => {
+    const paddedPage = String(pageNumber).padStart(4, '0');
+    return `${API_BASE_URL}/documents/${documentId}/images/page_${paddedPage}.jpg`;
+  },
 };
 
-// Export API - FIXED TO RETURN BLOB FOR FILE DOWNLOADS
-export const exportAPI = {
-  exportPDF: (conversationId) => 
-    api.post('/export/pdf', { conversationId }, { responseType: 'blob' }),
-  
-  exportDOCX: (conversationId) => 
-    api.post('/export/docx', { conversationId }, { responseType: 'blob' }),
-  
-  download: (filename) => `${API_URL}/export/download/${filename}`
+// ================================================================
+// CHAT API
+// ================================================================
+
+export const chatAPI = {
+  // Create new conversation
+  create: (title) => api.post('/chat/conversations', { title }),
+
+  // Get all conversations
+  getAll: () => api.get('/chat/conversations'),
+
+  // Get conversation by ID
+  getById: (id) => api.get(`/chat/conversations/${id}`),
+
+  // Delete conversation
+  delete: (id) => api.delete(`/chat/conversations/${id}`),
+
+  // Send message
+  sendMessage: (conversationId, message) =>
+    api.post(`/chat/conversations/${conversationId}/messages`, { message }),
+
+  // Stream message with SSE
+  streamMessage: (conversationId, message, onChunk, onComplete, onError) => {
+    const token = localStorage.getItem('accessToken');
+    const url = `${API_BASE_URL}/chat/conversations/${conversationId}/stream`;
+
+    const eventSource = new EventSource(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'token') {
+          onChunk(data.content);
+        } else if (data.type === 'done') {
+          onComplete(data);
+          eventSource.close();
+        } else if (data.type === 'error') {
+          onError(data);
+          eventSource.close();
+        }
+      } catch (error) {
+        console.error('Failed to parse SSE data:', error);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('SSE error:', error);
+      onError({ error: 'Connection lost' });
+      eventSource.close();
+    };
+
+    return eventSource;
+  },
 };
+
+// ================================================================
+// EXPORT API
+// ================================================================
+
+export const exportAPI = {
+  // Export chat as PDF
+  exportPDF: (conversationId) =>
+    api.get(`/export/conversation/${conversationId}/pdf`, {
+      responseType: 'blob',
+    }),
+
+  // Export chat as DOCX
+  exportDOCX: (conversationId) =>
+    api.get(`/export/conversation/${conversationId}/docx`, {
+      responseType: 'blob',
+    }),
+};
+
+export const conversationsAPI = chatAPI; 
 
 export default api;
