@@ -1,262 +1,422 @@
 // backend/src/services/chat.service.js
 'use strict';
 
-const prisma = require('../utils/prisma');
-const groqService = require('./ai/groq.service');
-const embeddingSearch = require('./vector/embedding-search.service');
-const { logger } = require('../utils/logger');
+const { PrismaClient } = require('@prisma/client');
+const Groq = require('groq-sdk');
 const config = require('../config');
+const { logger } = require('../utils/logger');
+const embeddingSearch = require('./vector/embedding-search.service');
+const imageExtractor = require('./pdf/image-extractor.service');
+
+const prisma = new PrismaClient();
 
 class ChatService {
-  // ----------------------------------------------------------------
-  // CONVERSATIONS
-  // ----------------------------------------------------------------
-
-  async createConversation(userId, firstMessage = null) {
-    let title = 'New Chat';
-
-    if (firstMessage) {
-      try {
-        title = await groqService.generateTitle(firstMessage);
-      } catch {
-        title = firstMessage.slice(0, 50) || 'New Chat';
-      }
-    }
-
-    const conversation = await prisma.conversation.create({
-      data: { userId, title }
-    });
-
-    logger.info('Conversation created', {
-      conversationId: conversation.id,
-      userId,
-      component: 'chat-service'
-    });
-
-    return conversation;
+  constructor() {
+    this.groq = config.GROQ_API_KEY ? new Groq({ apiKey: config.GROQ_API_KEY }) : null;
+    this.model = config.GROQ_MODEL;
   }
-
-  async getConversation(conversationId, userId) {
-    const conversation = await prisma.conversation.findFirst({
-      where: { id: conversationId, userId }
-    });
-
-    if (!conversation) throw new Error('Conversation not found');
-    return conversation;
-  }
-
-  async getUserConversations(userId, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-
-    const [conversations, total] = await Promise.all([
-      prisma.conversation.findMany({
-        where: { userId },
-        orderBy: { updatedAt: 'desc' },
-        skip,
-        take: limit,
-        select: {
-          id: true,
-          title: true,
-          totalMessages: true,
-          documentsUsed: true,
-          createdAt: true,
-          updatedAt: true
-        }
-      }),
-      prisma.conversation.count({ where: { userId } })
-    ]);
-
-    return {
-      conversations,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) }
-    };
-  }
-
-  async deleteConversation(conversationId, userId) {
-    const conversation = await prisma.conversation.findFirst({
-      where: { id: conversationId, userId }
-    });
-
-    if (!conversation) throw new Error('Conversation not found');
-
-    await prisma.conversation.delete({ where: { id: conversationId } });
-
-    logger.info('Conversation deleted', { conversationId, userId, component: 'chat-service' });
-  }
-
-  async updateConversationTitle(conversationId, userId, title) {
-    const conversation = await prisma.conversation.findFirst({
-      where: { id: conversationId, userId }
-    });
-
-    if (!conversation) throw new Error('Conversation not found');
-
-    return prisma.conversation.update({
-      where: { id: conversationId },
-      data: { title: title.trim() }
-    });
-  }
-
-  // ----------------------------------------------------------------
-  // MESSAGES
-  // ----------------------------------------------------------------
-
-  async getMessages(conversationId, limit = 50, offset = 0) {
-    return prisma.message.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: 'asc' },
-      take: limit,
-      skip: offset
-    });
-  }
-
-  async saveMessage(conversationId, role, content, extras = {}) {
-    const message = await prisma.message.create({
-      data: {
-        conversationId,
-        role,
-        content,
-        sources:   extras.sources   || null,
-        steps:     extras.steps     || null,
-        diagrams:  extras.diagrams  || null,
-        images:    extras.images    || null,
-        tokensUsed: extras.tokensUsed || null
-      }
-    });
-
-    // Keep totalMessages count in sync
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: {
-        totalMessages: { increment: 1 },
-        updatedAt: new Date()
-      }
-    });
-
-    return message;
-  }
-
-  // ----------------------------------------------------------------
-  // CONTEXT RETRIEVAL (semantic search over user's documents)
-  // ----------------------------------------------------------------
 
   /**
-   * Get the most relevant document chunks for a user's query.
-   * Returns empty array gracefully if embeddings aren't available.
-   *
-   * @param {string} userId
-   * @param {string} query
-   * @returns {Array} context chunks
+   * Send a message in a conversation
    */
-  async getRelevantContext(userId, query) {
+  async sendMessage(conversationId, userId, message) {
+    if (!this.groq) {
+      throw new Error('GROQ_API_KEY not configured');
+    }
+
     try {
-      const results = await embeddingSearch.search(userId, query, {
-        topK: 5,
-        minScore: 0.3
+      logger.info('Processing chat message', {
+        conversationId,
+        userId,
+        messageLength: message.length,
+        component: 'chat-service'
       });
 
-      return results;
+      // Get conversation
+      const conversation = await prisma.conversation.findFirst({
+        where: { id: conversationId, userId },
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' },
+            take: 20 // Last 20 messages for context
+          }
+        }
+      });
+
+      if (!conversation) {
+        throw new Error('Conversation not found');
+      }
+
+      // Save user message
+      await prisma.message.create({
+        data: {
+          conversationId,
+          role: 'user',
+          content: message
+        }
+      });
+
+      // Get relevant context from documents
+      const { textContext, images, sources } = await this._getRelevantContext(userId, message);
+
+      // Build messages for Groq
+      const systemPrompt = this._buildSystemPrompt();
+      const contextPrompt = this._buildContextPrompt(textContext, images);
+      const conversationHistory = conversation.messages.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'system', content: contextPrompt },
+        ...conversationHistory,
+        { role: 'user', content: message }
+      ];
+
+      // Call Groq API
+      logger.info('Calling Groq API', {
+        conversationId,
+        model: this.model,
+        component: 'chat-service'
+      });
+
+      const completion = await this.groq.chat.completions.create({
+        model: this.model,
+        messages,
+        max_tokens: config.GROQ_MAX_TOKENS,
+        temperature: config.GROQ_TEMPERATURE,
+        stream: false
+      });
+
+      const assistantMessage = completion.choices[0]?.message?.content || '';
+      const tokensUsed = completion.usage?.total_tokens || 0;
+
+      // Try to parse JSON response (if AI returned structured data)
+      let parsedResponse = null;
+      try {
+        const jsonMatch = assistantMessage.match(/```json\n([\s\S]+?)\n```/);
+        if (jsonMatch) {
+          parsedResponse = JSON.parse(jsonMatch[1]);
+        }
+      } catch {
+        // Not JSON, use plain text
+      }
+
+      // Extract structured fields if available
+      const steps = parsedResponse?.steps || null;
+      const diagrams = parsedResponse?.diagrams || null;
+
+      // Save assistant message
+      const savedMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          role: 'assistant',
+          content: assistantMessage,
+          sources: sources.length > 0 ? sources : null,
+          steps,
+          diagrams,
+          images: images.length > 0 ? images : null,
+          tokensUsed
+        }
+      });
+
+      // Update conversation
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: {
+          totalMessages: { increment: 2 },
+          updatedAt: new Date()
+        }
+      });
+
+      logger.info('Chat message processed', {
+        conversationId,
+        tokensUsed,
+        hasSteps: Boolean(steps),
+        imagesReturned: images.length,
+        component: 'chat-service'
+      });
+
+      return savedMessage;
+
     } catch (error) {
-      logger.warn('Context retrieval failed, proceeding without context', {
+      logger.error('Chat message processing failed', {
+        conversationId,
+        userId,
+        error: error.message,
+        stack: error.stack,
+        component: 'chat-service'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get relevant context from user's documents (REVISED WITH OCR)
+   * @private
+   */
+  async _getRelevantContext(userId, message) {
+    try {
+      // Vector search returns chunks from BOTH pdf_text and image_ocr
+      const searchResults = await embeddingSearch.search(userId, message, 10);
+
+      if (searchResults.length === 0) {
+        return {
+          textContext: '',
+          images: [],
+          sources: []
+        };
+      }
+
+      // Build text context from all chunks
+      const textContext = searchResults
+        .map((result, idx) => `[${idx + 1}] ${result.text}`)
+        .join('\n\n');
+
+      // Get unique image IDs from chunks that came from image OCR
+      const imageIds = [...new Set(
+        searchResults
+          .filter(r => r.sourceImageId)
+          .map(r => r.sourceImageId)
+      )];
+
+      // Fetch full image details
+      const images = [];
+      if (imageIds.length > 0) {
+        const imageRecords = await prisma.documentImage.findMany({
+          where: { id: { in: imageIds } },
+          select: {
+            id: true,
+            documentId: true,
+            pageNumber: true,
+            ocrText: true,
+            ocrConfidence: true
+          },
+          take: 10 // Limit to 10 images max
+        });
+
+        for (const img of imageRecords) {
+          images.push({
+            id: img.id,
+            url: imageExtractor.getImageUrl(img.documentId, img.pageNumber),
+            pageNumber: img.pageNumber,
+            documentId: img.documentId,
+            ocrText: img.ocrText?.substring(0, 200) + '...',
+            ocrConfidence: img.ocrConfidence
+          });
+        }
+      }
+
+      // Build sources array
+      const sources = searchResults.map(result => ({
+        documentId: result.documentId,
+        pageNumber: result.pageNumber,
+        sourceType: result.sourceType,
+        score: result.score
+      }));
+
+      logger.info('Context retrieved', {
+        userId,
+        chunksFound: searchResults.length,
+        imagesFound: images.length,
+        pdfTextChunks: searchResults.filter(r => r.sourceType === 'pdf_text').length,
+        ocrChunks: searchResults.filter(r => r.sourceType === 'image_ocr').length,
+        component: 'chat-service'
+      });
+
+      return { textContext, images, sources };
+
+    } catch (error) {
+      logger.error('Failed to get relevant context', {
         userId,
         error: error.message,
         component: 'chat-service'
       });
-      return [];
+      return {
+        textContext: '',
+        images: [],
+        sources: []
+      };
     }
   }
 
-  // ----------------------------------------------------------------
-  // IMAGE RETRIEVAL - Get images from documents used in context
-  // ----------------------------------------------------------------
+  /**
+   * Build system prompt
+   * @private
+   */
+  _buildSystemPrompt() {
+    return `You are PRISM, an intelligent SAP assistant. You help users understand SAP processes by providing clear, step-by-step instructions.
+
+When answering:
+1. Be concise and practical
+2. Reference specific transaction codes (tcodes)
+3. If images are available, mention which screenshots to look at
+4. Provide step-by-step instructions when appropriate
+5. Cite page numbers from source documents
+
+If you don't know the answer, say so clearly. Never make up information about SAP.`;
+  }
 
   /**
-   * Get relevant document images for a message based on context.
-   * ✅ NO HARDCODING - dynamically pulls images from documents used in context
-   *
-   * @param {Array} context - Context chunks from semantic search
-   * @returns {Array} Array of image objects with URLs
+   * Build context prompt with available documents and images
+   * @private
    */
-  async getRelevantImages(context) {
-    if (!context || context.length === 0) return [];
+  _buildContextPrompt(textContext, images) {
+    let prompt = '';
 
+    if (textContext) {
+      prompt += `DOCUMENT CONTEXT:\n${textContext}\n\n`;
+    }
+
+    if (images.length > 0) {
+      prompt += `AVAILABLE SCREENSHOTS (from SAP documents):\n`;
+      images.forEach((img, idx) => {
+        prompt += `[Image ${idx + 1}] Page ${img.pageNumber}\n`;
+        prompt += `  OCR Text: ${img.ocrText}\n`;
+        prompt += `  Confidence: ${(img.ocrConfidence * 100).toFixed(0)}%\n`;
+        prompt += `  URL: ${img.url}\n\n`;
+      });
+      prompt += `You can reference these images in your response by their number [Image 1], [Image 2], etc.\n\n`;
+    }
+
+    if (!textContext && images.length === 0) {
+      prompt = `No relevant documents found in the knowledge base. Answer based on general SAP knowledge or ask the user to upload relevant documents.`;
+    }
+
+    return prompt;
+  }
+
+  /**
+   * Create a new conversation
+   */
+  async createConversation(userId, title = 'New Chat') {
     try {
-      // Get unique document IDs from context
-      const documentIds = [...new Set(context.map(c => c.documentId))];
-
-      // Fetch images for these documents
-      const images = await prisma.documentImage.findMany({
-        where: {
-          documentId: { in: documentIds }
-        },
-        orderBy: { pageNumber: 'asc' },
-        take: 10 // Limit to 10 most relevant images
+      const conversation = await prisma.conversation.create({
+        data: {
+          userId,
+          title
+        }
       });
 
-      // Build public URLs for images
-      return images.map(img => ({
-        id: img.id,
-        documentId: img.documentId,
-        pageNumber: img.pageNumber,
-        url: `${config.BASE_URL}/api/documents/${img.documentId}/images/${img.storagePath.split('/').pop()}`,
-        width: img.width,
-        height: img.height
-      }));
+      logger.info('Conversation created', {
+        conversationId: conversation.id,
+        userId,
+        component: 'chat-service'
+      });
+
+      return conversation;
     } catch (error) {
-      logger.warn('Failed to fetch document images', {
+      logger.error('Failed to create conversation', {
+        userId,
         error: error.message,
         component: 'chat-service'
       });
-      return [];
+      throw error;
     }
   }
 
-  // ----------------------------------------------------------------
-  // PREPARE MESSAGES FOR GROQ
-  // (strip DB fields, keep only role + content)
-  // ----------------------------------------------------------------
-
-  prepareMessagesForLLM(dbMessages, newUserMessage) {
-    const history = dbMessages
-      .slice(-10) // last 10 messages for context window management
-      .map(m => ({ role: m.role, content: m.content }));
-
-    history.push({ role: 'user', content: newUserMessage });
-
-    return history;
-  }
-
-  // ----------------------------------------------------------------
-  // PARSE AI RESPONSE
-  // Groq returns JSON per our system prompt — parse it safely
-  // ----------------------------------------------------------------
-
-  parseAIResponse(rawContent) {
+  /**
+   * Get user's conversations
+   */
+  async getUserConversations(userId) {
     try {
-      // Strip markdown code fences if the model added them anyway
-      const cleaned = rawContent
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/```\s*$/i, '')
-        .trim();
+      const conversations = await prisma.conversation.findMany({
+        where: { userId },
+        orderBy: { updatedAt: 'desc' },
+        include: {
+          messages: {
+            take: 1,
+            orderBy: { createdAt: 'desc' }
+          }
+        }
+      });
 
-      const parsed = JSON.parse(cleaned);
-
-      return {
-        summary: parsed.summary || '',
-        steps: Array.isArray(parsed.steps) ? parsed.steps : [],
-        sources: Array.isArray(parsed.sources) ? parsed.sources : [],
-        hasDiagram: Boolean(parsed.hasDiagram)
-      };
-    } catch {
-      // If JSON parsing fails, treat the whole response as plain text summary
-      return {
-        summary: rawContent,
-        steps: [],
-        sources: [],
-        hasDiagram: false
-      };
+      return conversations;
+    } catch (error) {
+      logger.error('Failed to fetch conversations', {
+        userId,
+        error: error.message,
+        component: 'chat-service'
+      });
+      throw error;
     }
+  }
+
+  /**
+   * Get conversation by ID
+   */
+  async getConversation(conversationId, userId) {
+    try {
+      const conversation = await prisma.conversation.findFirst({
+        where: { id: conversationId, userId },
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' }
+          }
+        }
+      });
+
+      if (!conversation) {
+        throw new Error('Conversation not found');
+      }
+
+      return conversation;
+    } catch (error) {
+      logger.error('Failed to fetch conversation', {
+        conversationId,
+        userId,
+        error: error.message,
+        component: 'chat-service'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Delete conversation
+   */
+  async deleteConversation(conversationId, userId) {
+    try {
+      const conversation = await prisma.conversation.findFirst({
+        where: { id: conversationId, userId }
+      });
+
+      if (!conversation) {
+        throw new Error('Conversation not found');
+      }
+
+      await prisma.conversation.delete({
+        where: { id: conversationId }
+      });
+
+      logger.info('Conversation deleted', {
+        conversationId,
+        userId,
+        component: 'chat-service'
+      });
+
+      return { success: true };
+    } catch (error) {
+      logger.error('Failed to delete conversation', {
+        conversationId,
+        userId,
+        error: error.message,
+        component: 'chat-service'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Health check
+   */
+  healthCheck() {
+    return {
+      configured: Boolean(this.groq),
+      model: this.model,
+      status: this.groq ? 'ready' : 'not_configured'
+    };
   }
 }
 
