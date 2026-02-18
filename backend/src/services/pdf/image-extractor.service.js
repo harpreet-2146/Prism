@@ -1,31 +1,38 @@
 'use strict';
 
 /**
- * CRITICAL FIX: Set up canvas polyfills BEFORE requiring pdfjs-dist
- * This prevents "Cannot polyfill DOMMatrix/Path2D" warnings
+ * PDF Image Extraction Service
+ * Renders PDF pages as JPEG images using @napi-rs/canvas
  */
-global.DOMMatrix = class DOMMatrix {};
-global.Path2D = class Path2D {};
 
 const path = require('path');
 const fs = require('fs').promises;
-const { createCanvas } = require('@napi-rs/canvas');
 const config = require('../../config');
 const { logger } = require('../../utils/logger');
 
-// pdfjs-dist legacy build works in Node.js without a DOM
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+// Import canvas BEFORE pdfjs to avoid polyfill issues
+let createCanvas;
+try {
+  const canvasModule = require('canvas');
+  createCanvas = canvasModule.createCanvas;
+  logger.info('Canvas module loaded successfully', { component: 'image-extractor' });
+} catch (error) {
+  logger.error('Failed to load canvas module', { 
+    error: error.message, 
+    component: 'image-extractor' 
+  });
+  throw new Error('Canvas module not available');
+}
 
-// Disable the web worker — not available in Node.js
+// Set up canvas polyfills for pdfjs
+global.DOMMatrix = class DOMMatrix {};
+global.Path2D = class Path2D {};
+
+// Load pdfjs-dist
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 pdfjsLib.GlobalWorkerOptions.workerSrc = false;
+
 class ImageExtractorService {
-  /**
-   * Render PDF pages as JPEG images and save them to disk.
-   *
-   * @param {string} pdfFilePath  - Absolute path to the uploaded PDF
-   * @param {string} documentId   - Used to create a subdirectory for images
-   * @returns {Array} Array of image metadata objects saved to DB
-   */
   async extractImages(pdfFilePath, documentId) {
     const start = Date.now();
 
@@ -42,22 +49,21 @@ class ImageExtractorService {
       const outputDir = path.join(config.UPLOAD_DIR, 'images', documentId);
       await fs.mkdir(outputDir, { recursive: true });
 
-      // Read PDF into buffer
+      // Read PDF
       const pdfBuffer = await fs.readFile(pdfFilePath);
+      if (pdfBuffer.length === 0) {
+        throw new Error('PDF file is empty');
+      }
 
-      // Load PDF with pdfjs-dist
+      // Load PDF document
       const loadingTask = pdfjsLib.getDocument({
         data: new Uint8Array(pdfBuffer),
-        // Disable font loading to speed things up
         disableFontFace: true,
-        // Disable range requests
         isEvalSupported: false
       });
 
       const pdfDocument = await loadingTask.promise;
       const totalPages = pdfDocument.numPages;
-
-      // Respect the env var limit
       const pagesToExtract = Math.min(totalPages, config.MAX_PAGES_TO_EXTRACT);
 
       logger.info('PDF loaded, rendering pages', {
@@ -69,6 +75,7 @@ class ImageExtractorService {
 
       const extractedImages = [];
 
+      // Render pages sequentially with error handling
       for (let pageNum = 1; pageNum <= pagesToExtract; pageNum++) {
         try {
           const imageData = await this._renderPageAsImage(
@@ -77,21 +84,24 @@ class ImageExtractorService {
             outputDir,
             documentId
           );
-          extractedImages.push(imageData);
+          
+          if (imageData) {
+            extractedImages.push(imageData);
+          }
 
-          // Small delay every 5 pages to avoid CPU spikes
+          // Small delay every 5 pages
           if (pageNum % 5 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 50));
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
 
         } catch (pageError) {
-          // Don't let one bad page kill the whole extraction
           logger.warn('Failed to render page', {
             documentId,
             pageNum,
             error: pageError.message,
             component: 'image-extractor'
           });
+          // Continue with next page
         }
       }
 
@@ -114,86 +124,101 @@ class ImageExtractorService {
         stack: error.stack,
         component: 'image-extractor'
       });
-      // Return empty array — don't fail the whole document upload
+      // Return empty array instead of crashing
       return [];
     }
   }
 
-  // ----------------------------------------------------------------
-  // INTERNAL: render a single page to JPEG
-  // ----------------------------------------------------------------
-
   async _renderPageAsImage(pdfDocument, pageNum, outputDir, documentId) {
-    const page = await pdfDocument.getPage(pageNum);
+    try {
+      // Get page
+      const page = await pdfDocument.getPage(pageNum);
+      
+      // Calculate viewport
+      const scale = config.PDF_IMAGE_SCALE;
+      const viewport = page.getViewport({ scale });
 
-    // Scale controls resolution: 1.0 = 72dpi, 1.5 = 108dpi, 2.0 = 144dpi
-    const scale = config.PDF_IMAGE_SCALE;
-    const viewport = page.getViewport({ scale });
+      const width = Math.floor(viewport.width);
+      const height = Math.floor(viewport.height);
 
-    const width = Math.floor(viewport.width);
-    const height = Math.floor(viewport.height);
+      // Validate dimensions
+      if (width <= 0 || height <= 0 || width > 10000 || height > 10000) {
+        throw new Error(`Invalid dimensions: ${width}x${height}`);
+      }
 
-    // Create canvas at the scaled size
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
+      // Create canvas
+      const canvas = createCanvas(width, height);
+      const ctx = canvas.getContext('2d');
 
-    // White background (PDFs default to transparent)
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, width, height);
+      // White background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
 
-    // Render the page onto the canvas
-    const renderContext = {
-      canvasContext: ctx,
-      viewport
-    };
+      // Render PDF page
+      const renderContext = {
+        canvasContext: ctx,
+        viewport
+      };
 
-    await page.render(renderContext).promise;
+      await page.render(renderContext).promise;
 
-    // Save as JPEG
-    const filename = `page_${String(pageNum).padStart(4, '0')}.jpg`;
-    const storagePath = path.join(outputDir, filename);
+      // Generate filename
+      const filename = `page_${String(pageNum).padStart(4, '0')}.jpg`;
+      const storagePath = path.join(outputDir, filename);
 
-    const quality = config.PDF_IMAGE_QUALITY / 100; // canvas expects 0.0–1.0
-    const imageBuffer = canvas.toBuffer('image/jpeg', { quality });
+      // Convert to JPEG
+      const quality = config.PDF_IMAGE_QUALITY / 100;
+      const imageBuffer = canvas.toBuffer('image/jpeg', { quality });
 
-    await fs.writeFile(storagePath, imageBuffer);
+      // Save to disk
+      await fs.writeFile(storagePath, imageBuffer);
 
-    const fileSize = imageBuffer.length;
+      const fileSize = imageBuffer.length;
 
-    return {
-      pageNumber: pageNum,
-      imageIndex: pageNum - 1,
-      storagePath,
-      width,
-      height,
-      format: 'jpg',
-      fileSize
-    };
+      logger.info('Page rendered', {
+        documentId,
+        pageNum,
+        width,
+        height,
+        fileSize,
+        component: 'image-extractor'
+      });
+
+      return {
+        pageNumber: pageNum,
+        imageIndex: pageNum - 1,
+        storagePath,
+        width,
+        height,
+        format: 'jpg',
+        fileSize
+      };
+
+    } catch (error) {
+      logger.error('Page rendering failed', {
+        documentId,
+        pageNum,
+        error: error.message,
+        stack: error.stack,
+        component: 'image-extractor'
+      });
+      throw error;
+    }
   }
 
-  /**
-   * Get the public-facing URL path for a stored image.
-   * Used by the chat service to embed images in responses.
-   *
-   * @param {string} documentId
-   * @param {number} pageNumber
-   * @returns {string} URL path like /api/documents/images/DOC_ID/page_0001.jpg
-   */
   getImageUrl(documentId, pageNumber) {
     const filename = `page_${String(pageNumber).padStart(4, '0')}.jpg`;
     return `/api/documents/${documentId}/images/${filename}`;
   }
 
-  /**
-   * Delete all images for a document (called when document is deleted).
-   *
-   * @param {string} documentId
-   */
   async deleteDocumentImages(documentId) {
     const imageDir = path.join(config.UPLOAD_DIR, 'images', documentId);
     try {
       await fs.rm(imageDir, { recursive: true, force: true });
-      logger.info('Deleted document images', { documentId, component: 'image-extractor' });
+      logger.info('Deleted document images', { 
+        documentId, 
+        component: 'image-extractor' 
+      });
     } catch (error) {
       logger.warn('Failed to delete document images', {
         documentId,
