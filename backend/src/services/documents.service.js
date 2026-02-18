@@ -68,42 +68,46 @@ class DocumentsService {
   // LIST
   // ----------------------------------------------------------------
 
-  async getUserDocuments(userId, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
+   // Around line 95, update getUserDocuments:
 
-    const [documents, total] = await Promise.all([
-      prisma.document.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-        select: {
-          id: true,
-          originalName: true,
-          fileSize: true,
-          status: true,
-          embeddingStatus: true,
-          sapModule: true,
-          tcodes: true,
-          pageCount: true,
-          imageCount: true,
-          createdAt: true,
-          updatedAt: true
-        }
-      }),
-      prisma.document.count({ where: { userId } })
-    ]);
+async getUserDocuments(userId, page = 1, limit = 20) {
+  const skip = (page - 1) * limit;
 
-    return {
-      documents,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit)
+  const [documents, total] = await Promise.all([
+    prisma.document.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        originalName: true,
+        filename: true, // ✅ ADDED: Include filename for display
+        fileSize: true,
+        status: true,
+        embeddingStatus: true,
+        sapModule: true,
+        tcodes: true,
+        pageCount: true,
+        imageCount: true,
+        processingError: true, // ✅ ADDED: Show errors if any
+        createdAt: true,
+        updatedAt: true
       }
-    };
-  }
+    }),
+    prisma.document.count({ where: { userId } })
+  ]);
+
+  return {
+    documents,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  };
+}
 
   // ----------------------------------------------------------------
   // GET SINGLE
