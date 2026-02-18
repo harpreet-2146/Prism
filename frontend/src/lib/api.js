@@ -1,66 +1,50 @@
 import axios from 'axios';
 
-// Get API URL from environment
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
-// Create axios instance
 const api = axios.create({
-  baseURL: `${API_URL}/api`,
+  baseURL: API_URL,
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
   }
 });
 
-// Request interceptor - Add auth token
+// Request interceptor
 api.interceptors.request.use(
-  config => {
+  (config) => {
     const token = localStorage.getItem('accessToken');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
   },
-  error => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Response interceptor - Handle token refresh
+// Response interceptor
 api.interceptors.response.use(
-  response => response,
-  async error => {
+  (response) => response,
+  async (error) => {
     const originalRequest = error.config;
 
-    // If error is 401 and we haven't retried yet
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
       try {
         const refreshToken = localStorage.getItem('refreshToken');
-        if (!refreshToken) {
-          throw new Error('No refresh token');
-        }
-
-        // Try to refresh the token
-        const { data } = await axios.post(`${API_URL}/api/auth/refresh`, {
+        const response = await axios.post(`${API_URL}/auth/refresh`, {
           refreshToken
         });
 
-        // Save new tokens
-        localStorage.setItem('accessToken', data.accessToken);
-        if (data.refreshToken) {
-          localStorage.setItem('refreshToken', data.refreshToken);
-        }
+        const { accessToken } = response.data;
+        localStorage.setItem('accessToken', accessToken);
 
-        // Retry original request with new token
-        originalRequest.headers.Authorization = `Bearer ${data.accessToken}`;
+        originalRequest.headers.Authorization = `Bearer ${accessToken}`;
         return api(originalRequest);
       } catch (refreshError) {
-        // Refresh failed - logout user
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
-        localStorage.removeItem('user');
         window.location.href = '/login';
         return Promise.reject(refreshError);
       }
@@ -70,116 +54,76 @@ api.interceptors.response.use(
   }
 );
 
-// ================================================================
-// AUTHENTICATION
-// ================================================================
+// Auth API
 export const authAPI = {
-  register: data => api.post('/auth/register', data),
-  login: data => api.post('/auth/login', data),
+  register: (data) => api.post('/auth/register', data),
+  login: (data) => api.post('/auth/login', data),
   logout: () => api.post('/auth/logout'),
-  refresh: refreshToken => api.post('/auth/refresh', { refreshToken }),
-  getProfile: () => api.get('/auth/profile')
+  getProfile: () => api.get('/auth/profile'),
+  refreshToken: (refreshToken) => api.post('/auth/refresh', { refreshToken })
 };
 
-// ================================================================
-// CONVERSATIONS
-// ================================================================
-export const conversationsAPI = {
-  getAll: () => api.get('/conversations'),
-  getById: id => api.get(`/conversations/${id}`),
-  create: data => api.post('/conversations', data),
-  update: (id, data) => api.put(`/conversations/${id}`, data),
-  delete: id => api.delete(`/conversations/${id}`),
-  getMessages: id => api.get(`/conversations/${id}/messages`)
-};
-
-// ================================================================
-// CHAT (Streaming)
-// ================================================================
-export const chatAPI = {
-  // Regular chat request
-  sendMessage: data => api.post('/chat', data),
-
-  // Streaming chat with Server-Sent Events
-  streamMessage: async (data, onChunk, onComplete, onError) => {
-    try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`${API_URL}/api/chat/stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(data)
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
-              onComplete?.();
-              return;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              onChunk?.(parsed);
-            } catch (e) {
-              console.warn('Failed to parse SSE data:', data);
-            }
-          }
+// Documents API
+export const documentsAPI = {
+  list: (params) => api.get('/documents', { params }),
+  
+  upload: (formData, onUploadProgress) => {
+    return api.post('/documents', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      },
+      onUploadProgress: (progressEvent) => {
+        if (onUploadProgress && progressEvent.total) {
+          const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          onUploadProgress(progress);
         }
-      }
+      },
+      timeout: 300000 // 5 minutes for large files
+    });
+  },
+  
+  delete: (documentId) => api.delete(`/documents/${documentId}`),
+  getById: (documentId) => api.get(`/documents/${documentId}`),
+  getImages: (documentId) => api.get(`/documents/${documentId}/images`)
+};
 
-      onComplete?.();
-    } catch (error) {
-      onError?.(error);
-    }
+// Conversations API
+export const conversationsAPI = {
+  list: (params) => api.get('/chat/conversations', { params }),
+  getById: (conversationId) => api.get(`/chat/conversations/${conversationId}`),
+  create: () => api.post('/chat/conversations'),
+  delete: (conversationId) => api.delete(`/chat/conversations/${conversationId}`),
+  updateTitle: (conversationId, title) => 
+    api.patch(`/chat/conversations/${conversationId}/title`, { title })
+};
+
+// Chat API
+export const chatAPI = {
+  sendMessage: (conversationId, content) => 
+    api.post(`/chat/${conversationId}/messages`, { content }),
+  
+  streamMessage: (message, conversationId) => {
+    // Returns an EventSource for SSE streaming
+    const token = localStorage.getItem('accessToken');
+    const url = new URL(`${API_URL}/chat/stream`);
+    
+    // Cannot use EventSource with POST, so we'll use fetch
+    return fetch(`${API_URL}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ message, conversationId })
+    });
   }
 };
 
-// ================================================================
-// DOCUMENTS
-// ================================================================
-export const documentsAPI = {
-  getAll: () => api.get('/documents'),
-  getById: id => api.get(`/documents/${id}`),
-  upload: formData =>
-    api.post('/documents/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
-  delete: id => api.delete(`/documents/${id}`),
-  getPreview: id => api.get(`/documents/${id}/preview`)
-};
-
-// ================================================================
-// EXPORT
-// ================================================================
+// Export API
 export const exportAPI = {
-  exportToPDF: conversationId =>
-    api.get(`/export/pdf/${conversationId}`, {
-      responseType: 'blob'
-    }),
-  exportToDOCX: conversationId =>
-    api.get(`/export/docx/${conversationId}`, {
-      responseType: 'blob'
-    })
+  exportPDF: (conversationId) => api.post('/export/pdf', { conversationId }),
+  exportDOCX: (conversationId) => api.post('/export/docx', { conversationId }),
+  download: (filename) => `${API_URL}/export/download/${filename}`
 };
 
 export default api;
