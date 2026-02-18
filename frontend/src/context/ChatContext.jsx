@@ -11,176 +11,198 @@ export function ChatProvider({ children }) {
   const [streaming, setStreaming] = useState(false);
 
   // Fetch all conversations
- const  fetchConversations = useCallback(async () => {
-  try {
-    const { data } = await conversationsAPI.getAll(); // ✅ Changed from .list()
-    setConversations(data.conversations || []);
-  } catch (error) {
-    console.error('Failed to fetch conversations:', error);
-  }
-}, []);
+  const fetchConversations = useCallback(async () => {
+    try {
+      const { data } = await conversationsAPI.getAll();
+      setConversations(data.data?.conversations || []);
+    } catch (error) {
+      console.error('Failed to fetch conversations:', error);
+      setConversations([]);
+    }
+  }, []);
 
   // Fetch single conversation with messages
-  const fetchConversation = useCallback(async conversationId => {
+  const fetchConversation = useCallback(async (conversationId) => {
     try {
       setLoading(true);
       const { data } = await conversationsAPI.getById(conversationId);
-      setCurrentConversation(data.conversation);
-      setMessages(data.conversation.messages || []);
+      
+      console.log('📥 Loaded conversation:', data.data); // DEBUG
+      
+      setCurrentConversation(data.data.conversation);
+      setMessages(data.data.messages || []);
     } catch (error) {
       console.error('Failed to fetch conversation:', error);
+      setCurrentConversation(null);
+      setMessages([]);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Create new conversation
-const createConversation = useCallback(
-  async (title = 'New conversation') => { // ✅ Added default
-    try {
-      const { data } = await conversationsAPI.create({ title }); // ✅ Pass object
-      setConversations(prev => [data.conversation, ...prev]);
-      setCurrentConversation(data.conversation);
-      setMessages([]);
-      return data.conversation;
-    } catch (error) {
-      console.error('Failed to create conversation:', error);
-      throw error;
-    }
-  },
-  []
-);
+  // Create new conversation (backend creates it on first message)
+  const createConversation = useCallback(async () => {
+    console.log('🆕 Creating new conversation'); // DEBUG
+    // Just set empty state - backend will create conversation on first message
+    setCurrentConversation(null);
+    setMessages([]);
+    return { id: null }; // null ID means "new conversation"
+  }, []);
 
   // Delete conversation
-  const deleteConversation = useCallback(
-    async conversationId => {
-      try {
-        await conversationsAPI.delete(conversationId);
-        setConversations(prev => prev.filter(c => c.id !== conversationId));
+  const deleteConversation = useCallback(async (conversationId) => {
+    try {
+      await conversationsAPI.delete(conversationId);
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
 
-        if (currentConversation?.id === conversationId) {
-          setCurrentConversation(null);
-          setMessages([]);
-        }
-      } catch (error) {
-        console.error('Failed to delete conversation:', error);
-        throw error;
+      if (currentConversation?.id === conversationId) {
+        setCurrentConversation(null);
+        setMessages([]);
       }
-    },
-    [currentConversation]
-  );
-
-  // Send message (non-streaming)
-const sendMessage = useCallback(
-  async (content, documentIds = []) => {
-    if (!currentConversation) {
-      throw new Error('No active conversation');
+    } catch (error) {
+      console.error('Failed to delete conversation:', error);
+      throw error;
     }
+  }, [currentConversation]);
+
+  // Send message with streaming
+  const sendStreamingMessage = useCallback(async (content, conversationId = null) => {
+    console.log('📤 Sending message:', { content, conversationId }); // DEBUG
+    
+    // Add user message immediately
+    const userMessage = {
+      id: `temp-user-${Date.now()}`,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, userMessage]);
+
+    // Add placeholder for assistant message
+    const assistantMessageId = `temp-assistant-${Date.now()}`;
+    const assistantMessage = {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      images: [],
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, assistantMessage]);
+    setStreaming(true);
+
+    return new Promise((resolve, reject) => {
+      chatAPI.streamMessage(
+        {
+          message: content,
+          conversationId: conversationId || currentConversation?.id || undefined
+        },
+        // onChunk - append content as it streams
+        (chunk) => {
+          if (chunk.content) {
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, content: msg.content + chunk.content }
+                  : msg
+              )
+            );
+          }
+        },
+        // onComplete - finalize the message
+        (data) => {
+          console.log('🎯 SSE Complete - Full response data:', data); // DEBUG
+          console.log('🖼️  Images in response:', data.images); // DEBUG
+          
+          setMessages((prev) =>
+            prev.map((msg) => {
+              if (msg.id === assistantMessageId) {
+                // Images can be at different locations in the response
+                const images = data.images || data.parsed?.images || [];
+                
+                console.log('✅ Setting message images:', images); // DEBUG
+                
+                return {
+                  ...msg,
+                  id: data.messageId || msg.id,
+                  streaming: false,
+                  sources: data.sources || [],
+                  images: images
+                };
+              }
+              return msg;
+            })
+          );
+
+          // Update conversation if it was just created
+          if (data.conversationId && !currentConversation) {
+            console.log('📝 Created new conversation:', data.conversationId); // DEBUG
+            setCurrentConversation({ id: data.conversationId });
+            // Update URL without reload
+            window.history.replaceState(null, '', `/chat/${data.conversationId}`);
+          }
+
+          // Refresh conversations list
+          fetchConversations();
+          
+          setStreaming(false);
+          resolve(data);
+        },
+        // onError
+        (error) => {
+          console.error('❌ Streaming error:', error);
+          
+          // Remove the failed assistant message
+          setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessageId));
+          
+          setStreaming(false);
+          reject(error);
+        }
+      );
+    });
+  }, [currentConversation, fetchConversations]);
+
+  // Send message without streaming (fallback)
+  const sendMessage = useCallback(async (content, conversationId = null) => {
+    const userMessage = {
+      id: `temp-user-${Date.now()}`,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setLoading(true);
 
     try {
-      setLoading(true);
-
-      const userMessage = {
-        id: Date.now(),
-        role: 'user',
-        content,
-        createdAt: new Date().toISOString()
-      };
-      setMessages(prev => [...prev, userMessage]);
-
-      // ✅ Fixed API call format
       const { data } = await chatAPI.sendMessage({
-        conversationId: currentConversation.id,
         message: content,
-        documentIds
+        conversationId: conversationId || currentConversation?.id || undefined
       });
 
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== userMessage.id),
-        data.userMessage,
-        data.assistantMessage
+      // Replace temp message with real ones
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== userMessage.id),
+        data.data.userMessage,
+        data.data.assistantMessage
       ]);
 
+      // Update conversation if it was just created
+      if (data.data.conversationId && !currentConversation) {
+        setCurrentConversation({ id: data.data.conversationId });
+        window.history.replaceState(null, '', `/chat/${data.data.conversationId}`);
+      }
+
+      fetchConversations();
       return data;
     } catch (error) {
       console.error('Failed to send message:', error);
+      // Remove the failed user message
+      setMessages((prev) => prev.filter((m) => m.id !== userMessage.id));
       throw error;
     } finally {
       setLoading(false);
     }
-  },
-  [currentConversation]
-);
-  
-
-  // Send message with streaming
-  const sendStreamingMessage = useCallback(
-    async (content, documentIds = []) => {
-      if (!currentConversation) {
-        throw new Error('No active conversation');
-      }
-
-      // Add user message
-      const userMessage = {
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content,
-        createdAt: new Date().toISOString()
-      };
-      setMessages(prev => [...prev, userMessage]);
-
-      // Add placeholder for assistant message
-      const assistantMessageId = `assistant-${Date.now()}`;
-      const assistantMessage = {
-        id: assistantMessageId,
-        role: 'assistant',
-        content: '',
-        createdAt: new Date().toISOString(),
-        streaming: true
-      };
-      setMessages(prev => [...prev, assistantMessage]);
-      setStreaming(true);
-
-      return new Promise((resolve, reject) => {
-        chatAPI.streamMessage(
-          {
-            conversationId: currentConversation.id,
-            message: content,
-            documentIds
-          },
-          // onChunk
-          chunk => {
-            if (chunk.content) {
-              setMessages(prev =>
-                prev.map(msg =>
-                  msg.id === assistantMessageId
-                    ? { ...msg, content: msg.content + chunk.content }
-                    : msg
-                )
-              );
-            }
-          },
-          // onComplete
-          () => {
-            setMessages(prev =>
-              prev.map(msg =>
-                msg.id === assistantMessageId ? { ...msg, streaming: false } : msg
-              )
-            );
-            setStreaming(false);
-            resolve();
-          },
-          // onError
-          error => {
-            console.error('Streaming error:', error);
-            setStreaming(false);
-            reject(error);
-          }
-        );
-      });
-    },
-    [currentConversation]
-  );
+  }, [currentConversation, fetchConversations]);
 
   const value = {
     conversations,
