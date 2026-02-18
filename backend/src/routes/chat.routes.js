@@ -2,50 +2,41 @@
 'use strict';
 
 const express = require('express');
-const chatController = require('../controllers/chat.controller');
-const { verifyToken } = require('../middleware/auth.middleware');
-const { validateBody, validateParams, validateQuery, schemas } = require('../middleware/validation.middleware');
-
 const router = express.Router();
 
-// All chat routes require auth
-router.use(verifyToken);
+console.log('  → Loading chat controller...');
+const chatController = require('../controllers/chat.controller');
 
-// Health
-router.get('/health', chatController.healthCheck);
+console.log('  → Loading auth middleware...');
+const { authenticate } = require('../middleware/auth.middleware');
 
-// Streaming chat (SSE)
-router.post('/stream',
-  validateBody(schemas.chatMessage),
-  chatController.streamChat
-);
+console.log('  → Setting up chat routes...');
 
-// Non-streaming chat (fallback)
-router.post('/message',
-  validateBody(schemas.chatMessage),
-  chatController.sendMessage
-);
+// Create conversation
+router.post('/conversations', authenticate, (req, res) => {
+  chatController.createConversation(req, res);
+});
 
-// Conversations
-router.get('/conversations',
-  validateQuery(schemas.pagination),
-  chatController.getConversations
-);
+// Get all conversations
+router.get('/conversations', authenticate, (req, res) => {
+  chatController.getUserConversations(req, res);
+});
 
-router.get('/conversations/:id',
-  validateParams(schemas.uuidParam),
-  chatController.getConversation
-);
+// Get conversation by ID
+router.get('/conversations/:id', authenticate, (req, res) => {
+  chatController.getConversation(req, res);
+});
 
-router.patch('/conversations/:id/title',
-  validateParams(schemas.uuidParam),
-  validateBody(schemas.updateTitle),
-  chatController.updateTitle
-);
+// Delete conversation
+router.delete('/conversations/:id', authenticate, (req, res) => {
+  chatController.deleteConversation(req, res);
+});
 
-router.delete('/conversations/:id',
-  validateParams(schemas.uuidParam),
-  chatController.deleteConversation
-);
+// Send message
+router.post('/conversations/:id/messages', authenticate, (req, res) => {
+  chatController.sendMessage(req, res);
+});
+
+console.log('  → Chat routes configured');
 
 module.exports = router;
