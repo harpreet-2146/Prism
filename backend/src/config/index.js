@@ -114,6 +114,11 @@ const config = {
   HF_IMAGE_MODEL:    optionalEnv('HF_IMAGE_MODEL', 'stabilityai/stable-diffusion-2-1'),
   ENABLE_AI_IMAGE_GENERATION: optionalBool('ENABLE_AI_IMAGE_GENERATION', false),
 
+  // ---- OCR.space API (NEW) ----
+  OCR_SPACE_API_KEY:  optionalEnv('OCR_SPACE_API_KEY'),
+  OCR_SPACE_ENGINE:   optionalInt('OCR_SPACE_ENGINE', 2),
+  OCR_SPACE_LANGUAGE: optionalEnv('OCR_SPACE_LANGUAGE', 'eng'),
+
   // ---- Image Fallbacks ----
   UNSPLASH_ACCESS_KEY: optionalEnv('UNSPLASH_ACCESS_KEY'),
   PEXELS_API_KEY:      optionalEnv('PEXELS_API_KEY'),
@@ -147,6 +152,9 @@ if (!config.GROQ_API_KEY) {
 }
 if (!config.HF_TOKEN) {
   warnings.push('HF_TOKEN not set — document embeddings and semantic search will not work');
+}
+if (!config.OCR_SPACE_API_KEY) {
+  warnings.push('OCR_SPACE_API_KEY not set — image text extraction will not work (may reduce search accuracy)');
 }
 if (!config.UNSPLASH_ACCESS_KEY && !config.PEXELS_API_KEY) {
   warnings.push('UNSPLASH_ACCESS_KEY and PEXELS_API_KEY not set — image fallbacks disabled');
