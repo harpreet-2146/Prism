@@ -1,15 +1,16 @@
-import { useEffect, useState } from 'react'; 
-import { Link, useParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { MessageSquare, Plus, Trash2 } from 'lucide-react';
 import { useChat } from '@hooks/useChat';
 import { Button } from '@components/ui/button';
 import { Skeleton } from '@components/ui/skeleton';
-import { formatChatDate, truncate } from '@lib/utils';
-import { cn, groupBy } from '@lib/utils';
+import { formatChatDate, truncate, groupBy } from '@lib/utils';
+import { cn } from '@lib/utils';
 
 export default function Sidebar({ isOpen }) {
   const { conversationId } = useParams();
-  const { conversations, fetchConversations, createConversation, deleteConversation } = useChat();
+  const navigate = useNavigate();
+  const { conversations, fetchConversations, deleteConversation, createConversation } = useChat();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -23,11 +24,18 @@ export default function Sidebar({ isOpen }) {
   }, [fetchConversations]);
 
   const handleNewChat = async () => {
+    console.log('🆕 New Chat clicked'); // DEBUG
+    
     try {
-      const conversation = await createConversation('New conversation');
-      window.location.href = `/chat/${conversation.id}`;
+      // Clear the current conversation state
+      await createConversation();
+      
+      // Navigate to /chat (no ID)
+      navigate('/chat', { replace: true });
+      
+      console.log('✅ Navigated to new chat'); // DEBUG
     } catch (error) {
-      console.error('Failed to create conversation:', error);
+      console.error('Failed to create new chat:', error);
     }
   };
 
@@ -38,6 +46,11 @@ export default function Sidebar({ isOpen }) {
     if (confirm('Are you sure you want to delete this conversation?')) {
       try {
         await deleteConversation(id);
+        
+        // If deleted the current conversation, navigate to new chat
+        if (id === conversationId) {
+          navigate('/chat', { replace: true });
+        }
       } catch (error) {
         console.error('Failed to delete conversation:', error);
       }
@@ -45,9 +58,8 @@ export default function Sidebar({ isOpen }) {
   };
 
   // Group conversations by date
-  const groupedConversations = groupBy(
-    conversations,
-    conv => formatChatDate(conv.updatedAt)
+  const groupedConversations = groupBy(conversations, (conv) =>
+    formatChatDate(conv.updatedAt)
   );
 
   return (
@@ -81,9 +93,11 @@ export default function Sidebar({ isOpen }) {
           <div className="space-y-4 p-4">
             {Object.entries(groupedConversations).map(([date, convs]) => (
               <div key={date}>
-                <h3 className="mb-2 px-2 text-xs font-semibold text-muted-foreground">{date}</h3>
+                <h3 className="mb-2 px-2 text-xs font-semibold text-muted-foreground">
+                  {date}
+                </h3>
                 <div className="space-y-1">
-                  {convs.map(conv => (
+                  {convs.map((conv) => (
                     <Link
                       key={conv.id}
                       to={`/chat/${conv.id}`}
@@ -100,7 +114,7 @@ export default function Sidebar({ isOpen }) {
                         variant="ghost"
                         size="icon"
                         className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                        onClick={e => handleDeleteConversation(conv.id, e)}
+                        onClick={(e) => handleDeleteConversation(conv.id, e)}
                       >
                         <Trash2 className="h-3 w-3" />
                       </Button>
