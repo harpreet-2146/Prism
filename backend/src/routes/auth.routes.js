@@ -2,36 +2,50 @@
 'use strict';
 
 const express = require('express');
-const authController = require('../controllers/auth.controller');
-const { verifyToken } = require('../middleware/auth.middleware');
-const { validateBody, schemas } = require('../middleware/validation.middleware');
-const { auth: authRateLimit } = require('../middleware/rate-limit.middleware');
-
 const router = express.Router();
 
-// Public routes (no auth required)
-router.post('/register',
-  authRateLimit,
-  validateBody(schemas.register),
-  authController.register
-);
+console.log('  → Loading auth controller...');
+const authController = require('../controllers/auth.controller');
 
-router.post('/login',
-  authRateLimit,
-  validateBody(schemas.login),
-  authController.login
-);
+console.log('  → Loading auth middleware...');
+const { authenticate } = require('../middleware/auth.middleware');
 
-router.post('/refresh',
-  validateBody(schemas.refreshToken),
-  authController.refresh
-);
+console.log('  → Setting up auth routes...');
+
+// Public routes
+router.post('/register', (req, res) => {
+  authController.register(req, res);
+});
+
+router.post('/login', (req, res) => {
+  authController.login(req, res);
+});
+
+router.post('/refresh', (req, res) => {
+  authController.refresh(req, res);
+});
 
 // Protected routes
-router.post('/logout',           verifyToken, authController.logout);
-router.get('/me',                verifyToken, authController.getMe);
-router.patch('/profile',         verifyToken, validateBody(schemas.updateProfile),  authController.updateProfile);
-router.post('/change-password',  verifyToken, validateBody(schemas.changePassword), authController.changePassword);
-router.delete('/account',        verifyToken, validateBody(schemas.deleteAccount),  authController.deleteAccount);
+router.post('/logout', authenticate, (req, res) => {
+  authController.logout(req, res);
+});
+
+router.get('/me', authenticate, (req, res) => {
+  authController.getMe(req, res);  // ← Changed from .me to .getMe
+});
+
+router.put('/profile', authenticate, (req, res) => {
+  authController.updateProfile(req, res);
+});
+
+router.post('/change-password', authenticate, (req, res) => {
+  authController.changePassword(req, res);
+});
+
+router.delete('/account', authenticate, (req, res) => {
+  authController.deleteAccount(req, res);
+});
+
+console.log('  → Auth routes configured');
 
 module.exports = router;
