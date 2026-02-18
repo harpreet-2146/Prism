@@ -5,6 +5,7 @@ const prisma = require('../utils/prisma');
 const groqService = require('./ai/groq.service');
 const embeddingSearch = require('./vector/embedding-search.service');
 const { logger } = require('../utils/logger');
+const config = require('../config');
 
 class ChatService {
   // ----------------------------------------------------------------
@@ -158,6 +159,51 @@ class ChatService {
     } catch (error) {
       logger.warn('Context retrieval failed, proceeding without context', {
         userId,
+        error: error.message,
+        component: 'chat-service'
+      });
+      return [];
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // IMAGE RETRIEVAL - Get images from documents used in context
+  // ----------------------------------------------------------------
+
+  /**
+   * Get relevant document images for a message based on context.
+   * ✅ NO HARDCODING - dynamically pulls images from documents used in context
+   *
+   * @param {Array} context - Context chunks from semantic search
+   * @returns {Array} Array of image objects with URLs
+   */
+  async getRelevantImages(context) {
+    if (!context || context.length === 0) return [];
+
+    try {
+      // Get unique document IDs from context
+      const documentIds = [...new Set(context.map(c => c.documentId))];
+
+      // Fetch images for these documents
+      const images = await prisma.documentImage.findMany({
+        where: {
+          documentId: { in: documentIds }
+        },
+        orderBy: { pageNumber: 'asc' },
+        take: 10 // Limit to 10 most relevant images
+      });
+
+      // Build public URLs for images
+      return images.map(img => ({
+        id: img.id,
+        documentId: img.documentId,
+        pageNumber: img.pageNumber,
+        url: `${config.BASE_URL}/api/documents/${img.documentId}/images/${img.storagePath.split('/').pop()}`,
+        width: img.width,
+        height: img.height
+      }));
+    } catch (error) {
+      logger.warn('Failed to fetch document images', {
         error: error.message,
         component: 'chat-service'
       });
