@@ -22,7 +22,7 @@ export function AuthProvider({ children }) {
           setIsAuthenticated(true);
 
           // Verify token is still valid
-          const { data } = await authAPI.getProfile();
+          const { data } = await authAPI.me();
           setUser(data.user);
         } catch (error) {
           console.error('Auth initialization failed:', error);
