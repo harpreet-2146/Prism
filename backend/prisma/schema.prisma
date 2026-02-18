@@ -1,5 +1,3 @@
-// backend/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,193 +7,142 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ================================================================
-// USERS
-// ================================================================
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  fullName     String?  @map("full_name")
-
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-
-  // Relations
-  documents     Document[]
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String         @map("password_hash")
+  fullName      String?        @map("full_name")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
   conversations Conversation[]
+  documents     Document[]
   embeddings    Embedding[]
   refreshTokens RefreshToken[]
 
-  @@map("users")
   @@index([email])
+  @@map("users")
 }
 
-// ================================================================
-// DOCUMENTS (uploaded PDFs)
-// ================================================================
 model Document {
-  id           String  @id @default(uuid())
-  userId       String  @map("user_id")
+  id              String          @id @default(uuid())
+  userId          String          @map("user_id")
+  filename        String
+  originalName    String          @map("original_name")
+  fileSize        Int             @map("file_size")
+  mimeType        String          @map("mime_type")
+  storagePath     String          @map("storage_path")
+  sapModule       String?         @map("sap_module")
+  tcodes          String[]        @default([])
+  errorCodes      String[]        @default([]) @map("error_codes")
+  noteNumber      String?         @map("note_number")
+  status          String          @default("pending")
+  processingError String?         @map("processing_error")
+  textContent     String?         @map("text_content")
+  pageCount       Int             @default(0) @map("page_count")
+  imageCount      Int             @default(0) @map("image_count")
+  embeddingStatus String          @default("pending") @map("embedding_status")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  images          DocumentImage[]
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  embeddings      Embedding[]
 
-  filename     String
-  originalName String  @map("original_name")
-  fileSize     Int     @map("file_size")
-  mimeType     String  @map("mime_type")
-  storagePath  String  @map("storage_path")
-
-  // SAP metadata auto-detected from PDF text
-  sapModule    String?  @map("sap_module")
-  tcodes       String[] @default([])
-  errorCodes   String[] @default([]) @map("error_codes")
-  noteNumber   String?  @map("note_number")
-
-  // Processing status: pending | processing | completed | failed
-  status          String  @default("pending")
-  processingError String? @map("processing_error")
-
-  // Extracted content
-  textContent String? @db.Text @map("text_content")
-  pageCount   Int     @default(0) @map("page_count")
-  imageCount  Int     @default(0) @map("image_count")
-
-  // Embedding status: pending | processing | completed | failed
-  embeddingStatus String @default("pending") @map("embedding_status")
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  // Relations
-  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  images     DocumentImage[]
-  embeddings Embedding[]
-
-  @@map("documents")
   @@index([userId])
   @@index([status])
   @@index([sapModule])
+  @@map("documents")
 }
 
-// ================================================================
-// DOCUMENT IMAGES (PDF pages rendered as JPEG/PNG images)
-// ================================================================
 model DocumentImage {
-  id          String @id @default(uuid())
-  documentId  String @map("document_id")
+  id            String      @id @default(uuid())
+  documentId    String      @map("document_id")
+  pageNumber    Int         @map("page_number")
+  imageIndex    Int         @map("image_index")
+  storagePath   String      @map("storage_path")
+  width         Int
+  height        Int
+  format        String
+  fileSize      Int         @map("file_size")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  ocrText       String?     @map("ocr_text")
+  ocrConfidence Float?      @map("ocr_confidence")
+  ocrLanguage   String?     @default("eng") @map("ocr_language")
+  ocrStatus     String      @default("pending") @map("ocr_status")
+  document      Document    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  embeddings    Embedding[]
 
-  pageNumber  Int    @map("page_number")
-  imageIndex  Int    @map("image_index")
-  storagePath String @map("storage_path")
-
-  width    Int
-  height   Int
-  format   String
-  fileSize Int    @map("file_size")
-
-  createdAt DateTime @default(now()) @map("created_at")
-
-  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-
-  @@map("document_images")
   @@index([documentId])
   @@index([pageNumber])
+  @@index([ocrStatus])
+  @@map("document_images")
 }
 
-// ================================================================
-// EMBEDDINGS
-// Replaces Milvus. 384-float arrays stored as JSON in PostgreSQL.
-// Cosine similarity is computed in JavaScript at query time.
-// Source model: sentence-transformers/all-MiniLM-L6-v2 via HF API
-// ================================================================
 model Embedding {
-  id         String @id @default(uuid())
-  documentId String @map("document_id")
-  userId     String @map("user_id")
+  id            String         @id @default(uuid())
+  documentId    String         @map("document_id")
+  userId        String         @map("user_id")
+  chunkIndex    Int            @map("chunk_index")
+  pageNumber    Int            @default(1) @map("page_number")
+  text          String
+  embedding     Json
+  createdAt     DateTime       @default(now()) @map("created_at")
+  sourceType    String         @map("source_type")
+  sourceImageId String?        @map("source_image_id")
+  document      Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  sourceImage   DocumentImage? @relation(fields: [sourceImageId], references: [id], onDelete: Cascade)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  chunkIndex Int    @map("chunk_index")
-  pageNumber Int    @default(1) @map("page_number")
-  text       String @db.Text
-
-  // Stored as JSON array: [0.123, -0.456, 0.789, ...]
-  embedding Json
-
-  createdAt DateTime @default(now()) @map("created_at")
-
-  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("embeddings")
   @@index([documentId])
   @@index([userId])
+  @@index([sourceType])
+  @@index([sourceImageId])
+  @@map("embeddings")
 }
 
-// ================================================================
-// CONVERSATIONS
-// ================================================================
 model Conversation {
-  id            String   @id @default(uuid())
-  userId        String   @map("user_id")
-  title         String   @default("New Chat")
-  documentsUsed String[] @default([]) @map("documents_used")
-  totalMessages Int      @default(0) @map("total_messages")
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  title         String    @default("New Chat")
+  documentsUsed String[]  @default([]) @map("documents_used")
+  totalMessages Int       @default(0) @map("total_messages")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages      Message[]
 
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages Message[]
-
-  @@map("conversations")
   @@index([userId])
   @@index([createdAt])
+  @@map("conversations")
 }
 
-// ================================================================
-// MESSAGES
-// ================================================================
 model Message {
-  id             String @id @default(uuid())
-  conversationId String @map("conversation_id")
+  id             String       @id @default(uuid())
+  conversationId String       @map("conversation_id")
+  role           String
+  content        String
+  sources        Json?
+  steps          Json?
+  diagrams       Json?
+  images         Json?
+  tokensUsed     Int?         @map("tokens_used")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  // 'user' or 'assistant'
-  role    String
-  content String @db.Text
-
-  // All nullable — only populated on assistant messages
-  // sources:  [{type, id, title, pageNumber}]
-  sources  Json?
-  // steps:    [{title, description, tcode, imageUrl, screenshotDescription}]
-  steps    Json?
-  // diagrams: mermaid code string
-  diagrams Json?
-  // images:   [{url, source, pageNumber, documentId}]
-  images   Json?
-
-  tokensUsed Int? @map("tokens_used")
-
-  createdAt DateTime @default(now()) @map("created_at")
-
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@map("messages")
   @@index([conversationId])
   @@index([createdAt])
+  @@map("messages")
 }
 
-// ================================================================
-// REFRESH TOKENS
-// ================================================================
 model RefreshToken {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")
   token     String   @unique
   expiresAt DateTime @map("expires_at")
   createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("refresh_tokens")
   @@index([userId])
   @@index([token])
   @@index([expiresAt])
+  @@map("refresh_tokens")
 }
