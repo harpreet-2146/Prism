@@ -1,4 +1,3 @@
-// backend/src/routes/documents.routes.js
 'use strict';
 
 const express = require('express');
@@ -10,10 +9,9 @@ const { validateParams, validateQuery, schemas } = require('../middleware/valida
 
 const router = express.Router();
 
-// All document routes require auth
 router.use(verifyToken);
 
-// Upload
+// ✅ Upload route
 router.post('/',
   uploadRateLimit,
   single,
@@ -21,36 +19,11 @@ router.post('/',
   documentsController.upload
 );
 
-// List
-router.get('/',
-  validateQuery(schemas.pagination),
-  documentsController.list
-);
-
-// Stats
+router.get('/', validateQuery(schemas.pagination), documentsController.list);
 router.get('/stats', documentsController.stats);
-
-// Single document
-router.get('/:id',
-  validateParams(schemas.uuidParam),
-  documentsController.getOne
-);
-
-// Delete
-router.delete('/:id',
-  validateParams(schemas.uuidParam),
-  documentsController.remove
-);
-
-// Get document images list
-router.get('/:id/images',
-  validateParams(schemas.uuidParam),
-  documentsController.getImages
-);
-
-// Serve a specific image file
-router.get('/:id/images/:filename',
-  documentsController.serveImage
-);
+router.get('/:id', validateParams(schemas.uuidParam), documentsController.getOne);
+router.delete('/:id', validateParams(schemas.uuidParam), documentsController.remove);
+router.get('/:id/images', validateParams(schemas.uuidParam), documentsController.getImages);
+router.get('/:id/images/:filename', documentsController.serveImage);
 
 module.exports = router;
