@@ -1,86 +1,104 @@
 // backend/src/services/vector/embedding-search.service.js
 'use strict';
 
-/**
- * CRIT-01 FIX:
- *
- * Old broken approach:
- *   - Used @zilliz/milvus2-sdk-node connecting to localhost:19530
- *   - Milvus Lite is Python-only — no embedded Node.js version exists
- *   - On Railway there is no Milvus server, so every call crashed
- *
- * Correct approach (this file):
- *   - Embeddings stored as JSON arrays in the PostgreSQL `embeddings` table
- *   - Cosine similarity computed in JavaScript
- *   - Zero extra infrastructure — works with the existing Railway PostgreSQL
- *   - Scales fine for PRISM's target use case (hundreds of documents per user)
- *   - Can migrate to pgvector later if needed — same API surface
- */
-
-const prisma = require('../../utils/prisma');
-const embeddingService = require('../ai/embedding.service');
+const { HfInference } = require('@huggingface/inference');
+const { PrismaClient } = require('@prisma/client');
 const config = require('../../config');
 const { logger } = require('../../utils/logger');
 
+const prisma = new PrismaClient();
+
 class EmbeddingSearchService {
+  constructor() {
+    this.hf = config.HF_TOKEN ? new HfInference(config.HF_TOKEN) : null;
+    this.model = config.HF_EMBEDDING_MODEL;
+  }
+
   /**
-   * Store text chunks + their embeddings for a document.
-   * Called after PDF text extraction completes.
-   *
-   * @param {string} userId
-   * @param {string} documentId
-   * @param {Array}  chunks - [{ text, chunkIndex, pageNumber }]
+   * Create embeddings for document chunks and store in PostgreSQL
+   * @param {string} userId - User ID
+   * @param {string} documentId - Document ID
+   * @param {Array} chunks - Array of {text, chunkIndex, pageNumber, sourceType, sourceImageId}
    */
   async indexDocumentChunks(userId, documentId, chunks) {
-    if (!chunks || chunks.length === 0) {
-      logger.warn('No chunks to index', { documentId, userId, component: 'embedding-search' });
-      return { indexed: 0 };
+    if (!this.hf) {
+      logger.warn('HuggingFace token not configured, skipping embedding creation', {
+        documentId,
+        component: 'embedding-search'
+      });
+      return;
     }
 
-    const start = Date.now();
-
-    logger.info('Starting chunk indexing', {
-      documentId,
-      userId,
-      chunkCount: chunks.length,
-      component: 'embedding-search'
-    });
-
     try {
-      // Generate embeddings in batches
-      const texts = chunks.map(c => c.text);
-      const embeddings = await embeddingService.generateBatchEmbeddings(texts);
-
-      // Build Prisma create payloads
-      const records = chunks.map((chunk, i) => ({
-        documentId,
+      logger.info('Creating embeddings for document chunks', {
         userId,
-        chunkIndex: chunk.chunkIndex,
-        pageNumber: chunk.pageNumber || 1,
-        text: chunk.text,
-        embedding: embeddings[i] // stored as JSON array
-      }));
-
-      // Delete existing embeddings for this document first (re-processing case)
-      await prisma.embedding.deleteMany({ where: { documentId } });
-
-      // Batch insert — createMany is much faster than individual creates
-      await prisma.embedding.createMany({ data: records });
-
-      logger.info('Chunk indexing complete', {
         documentId,
-        userId,
-        indexed: records.length,
-        ms: Date.now() - start,
+        chunkCount: chunks.length,
         component: 'embedding-search'
       });
 
-      return { indexed: records.length };
+      const embeddingRecords = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+
+        try {
+          // Create embedding via HuggingFace API
+          const embedding = await this._createEmbedding(chunk.text);
+
+          embeddingRecords.push({
+            userId,
+            documentId,
+            chunkIndex: chunk.chunkIndex,
+            pageNumber: chunk.pageNumber,
+            text: chunk.text,
+            sourceType: chunk.sourceType, // 'pdf_text' or 'image_ocr'
+            sourceImageId: chunk.sourceImageId, // null for pdf_text, imageId for image_ocr
+            embedding: embedding
+          });
+
+          // Log progress every 10 chunks
+          if ((i + 1) % 10 === 0) {
+            logger.info('Embedding progress', {
+              documentId,
+              processed: i + 1,
+              total: chunks.length,
+              component: 'embedding-search'
+            });
+          }
+
+          // Small delay to avoid rate limits
+          await this._sleep(100);
+
+        } catch (error) {
+          logger.error('Failed to create embedding for chunk', {
+            documentId,
+            chunkIndex: chunk.chunkIndex,
+            error: error.message,
+            component: 'embedding-search'
+          });
+          // Continue with other chunks
+        }
+      }
+
+      // Batch insert all embeddings
+      if (embeddingRecords.length > 0) {
+        await prisma.embedding.createMany({
+          data: embeddingRecords
+        });
+
+        logger.info('Embeddings created and stored', {
+          documentId,
+          totalEmbeddings: embeddingRecords.length,
+          pdfTextEmbeddings: embeddingRecords.filter(e => e.sourceType === 'pdf_text').length,
+          imageOcrEmbeddings: embeddingRecords.filter(e => e.sourceType === 'image_ocr').length,
+          component: 'embedding-search'
+        });
+      }
 
     } catch (error) {
-      logger.error('Chunk indexing failed', {
+      logger.error('Embedding indexing failed', {
         documentId,
-        userId,
         error: error.message,
         stack: error.stack,
         component: 'embedding-search'
@@ -90,157 +108,215 @@ class EmbeddingSearchService {
   }
 
   /**
-   * Semantic search: find the top-K most relevant chunks for a query.
-   * Searches only within the given user's documents.
-   *
-   * @param {string} userId
-   * @param {string} queryText
-   * @param {Object} options
-   * @param {number} options.topK          - Number of results (default 5)
-   * @param {string} [options.documentId]  - Limit to one document if provided
-   * @param {number} options.minScore      - Min cosine similarity 0–1 (default 0.3)
-   * @returns {Array} [{text, documentId, pageNumber, score, chunkIndex}]
+   * Search for relevant document chunks using vector similarity
+   * @param {string} userId - User ID
+   * @param {string} query - Search query
+   * @param {number} topK - Number of results to return
+   * @returns {Array} - Array of {text, pageNumber, documentId, sourceType, sourceImageId, score}
    */
-  async search(userId, queryText, options = {}) {
-    const { topK = 5, documentId = null, minScore = 0.3 } = options;
-
-    if (!queryText || queryText.trim().length === 0) return [];
+  async search(userId, query, topK = 10) {
+    if (!this.hf) {
+      logger.warn('HuggingFace token not configured, search unavailable', {
+        component: 'embedding-search'
+      });
+      return [];
+    }
 
     try {
-      // Generate query embedding
-      const queryEmbedding = await embeddingService.generateEmbedding(queryText);
+      logger.info('Searching embeddings', {
+        userId,
+        query: query.substring(0, 50),
+        topK,
+        component: 'embedding-search'
+      });
 
-      // Fetch stored embeddings (filter by user, optionally by document)
-      const where = { userId };
-      if (documentId) where.documentId = documentId;
+      // Create embedding for the query
+      const queryEmbedding = await this._createEmbedding(query);
 
-      const stored = await prisma.embedding.findMany({
-        where,
+      // Get all embeddings for user
+      const userEmbeddings = await prisma.embedding.findMany({
+        where: { userId },
         select: {
           id: true,
-          documentId: true,
-          chunkIndex: true,
-          pageNumber: true,
           text: true,
-          embedding: true,
-          document: { select: { originalName: true } }
+          pageNumber: true,
+          documentId: true,
+          sourceType: true,
+          sourceImageId: true,
+          embedding: true
         }
       });
 
-      if (stored.length === 0) return [];
+      if (userEmbeddings.length === 0) {
+        logger.info('No embeddings found for user', {
+          userId,
+          component: 'embedding-search'
+        });
+        return [];
+      }
 
-      // Compute cosine similarity for each stored embedding
-      const scored = stored
-        .map(row => {
-          const storedVec = row.embedding; // JSON array from DB
-          const score = this._cosineSimilarity(queryEmbedding, storedVec);
-          return {
-            text: row.text,
-            documentId: row.documentId,
-            documentName: row.document?.originalName || 'Unknown',
-            pageNumber: row.pageNumber,
-            chunkIndex: row.chunkIndex,
-            score
-          };
-        })
-        .filter(r => r.score >= minScore)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
+      // Calculate cosine similarity for each embedding
+      const results = userEmbeddings.map(emb => {
+        const score = this._cosineSimilarity(queryEmbedding, emb.embedding);
+        return {
+          id: emb.id,
+          text: emb.text,
+          pageNumber: emb.pageNumber,
+          documentId: emb.documentId,
+          sourceType: emb.sourceType,
+          sourceImageId: emb.sourceImageId,
+          score
+        };
+      });
 
-      logger.info('Semantic search complete', {
+      // Sort by score (highest first) and take top K
+      results.sort((a, b) => b.score - a.score);
+      const topResults = results.slice(0, topK);
+
+      logger.info('Search complete', {
         userId,
-        queryLength: queryText.length,
-        candidatesEvaluated: stored.length,
-        resultsReturned: scored.length,
-        topScore: scored[0]?.score?.toFixed(3),
+        totalEmbeddings: userEmbeddings.length,
+        topScore: topResults[0]?.score.toFixed(3),
+        resultsReturned: topResults.length,
+        pdfTextResults: topResults.filter(r => r.sourceType === 'pdf_text').length,
+        imageOcrResults: topResults.filter(r => r.sourceType === 'image_ocr').length,
         component: 'embedding-search'
       });
 
-      return scored;
+      return topResults;
 
     } catch (error) {
-      logger.error('Semantic search failed', {
+      logger.error('Search failed', {
         userId,
+        query: query.substring(0, 50),
         error: error.message,
+        stack: error.stack,
         component: 'embedding-search'
       });
-      // Graceful degradation — return empty array so chat still works
-      return [];
+      throw error;
     }
   }
 
   /**
-   * Delete all embeddings for a document.
-   * Called when a document is deleted.
-   *
-   * @param {string} documentId
+   * Delete all embeddings for a document
    */
   async deleteDocumentEmbeddings(documentId) {
     try {
-      const { count } = await prisma.embedding.deleteMany({ where: { documentId } });
-      logger.info('Deleted document embeddings', {
+      const result = await prisma.embedding.deleteMany({
+        where: { documentId }
+      });
+
+      logger.info('Document embeddings deleted', {
         documentId,
-        count,
+        count: result.count,
         component: 'embedding-search'
       });
+
+      return result;
     } catch (error) {
-      logger.warn('Failed to delete embeddings', {
+      logger.error('Failed to delete embeddings', {
         documentId,
         error: error.message,
         component: 'embedding-search'
       });
+      throw error;
     }
   }
 
   /**
-   * Count how many chunks are indexed for a user.
-   * @param {string} userId
-   * @returns {number}
+   * Get embeddings count for a document
    */
-  async getIndexedChunkCount(userId) {
-    return prisma.embedding.count({ where: { userId } });
-  }
-
-  /**
-   * Health check.
-   */
-  async healthCheck() {
+  async getDocumentEmbeddingCount(documentId) {
     try {
-      const count = await prisma.embedding.count();
-      return { status: 'healthy', totalEmbeddings: count };
+      const count = await prisma.embedding.count({
+        where: { documentId }
+      });
+      return count;
     } catch (error) {
-      return { status: 'unhealthy', error: error.message };
+      logger.error('Failed to count embeddings', {
+        documentId,
+        error: error.message,
+        component: 'embedding-search'
+      });
+      return 0;
     }
   }
 
-  // ----------------------------------------------------------------
-  // INTERNAL: Cosine Similarity
-  // ----------------------------------------------------------------
+  /**
+   * Create embedding vector using HuggingFace API
+   * @private
+   */
+  async _createEmbedding(text) {
+    try {
+      const response = await this.hf.featureExtraction({
+        model: this.model,
+        inputs: text
+      });
+
+      // Response is already an array of floats
+      return response;
+
+    } catch (error) {
+      logger.error('Embedding creation failed', {
+        model: this.model,
+        textLength: text.length,
+        error: error.message,
+        component: 'embedding-search'
+      });
+      throw error;
+    }
+  }
 
   /**
-   * Compute cosine similarity between two float arrays.
-   * Returns a value between -1.0 and 1.0 (higher = more similar).
-   * For all-MiniLM-L6-v2 embeddings, relevant matches are typically > 0.3.
+   * Calculate cosine similarity between two vectors
+   * @private
    */
-  _cosineSimilarity(a, b) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+  _cosineSimilarity(vecA, vecB) {
+    if (!Array.isArray(vecA) || !Array.isArray(vecB)) {
       return 0;
     }
 
-    let dot = 0;
+    if (vecA.length !== vecB.length) {
+      return 0;
+    }
+
+    let dotProduct = 0;
     let normA = 0;
     let normB = 0;
 
-    for (let i = 0; i < a.length; i++) {
-      dot   += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
+    for (let i = 0; i < vecA.length; i++) {
+      dotProduct += vecA[i] * vecB[i];
+      normA += vecA[i] * vecA[i];
+      normB += vecB[i] * vecB[i];
     }
 
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    if (denom === 0) return 0;
+    normA = Math.sqrt(normA);
+    normB = Math.sqrt(normB);
 
-    return dot / denom;
+    if (normA === 0 || normB === 0) {
+      return 0;
+    }
+
+    return dotProduct / (normA * normB);
+  }
+
+  /**
+   * Sleep utility for rate limiting
+   * @private
+   */
+  _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Health check
+   */
+  healthCheck() {
+    return {
+      configured: Boolean(this.hf),
+      model: this.model,
+      status: this.hf ? 'ready' : 'not_configured'
+    };
   }
 }
 
