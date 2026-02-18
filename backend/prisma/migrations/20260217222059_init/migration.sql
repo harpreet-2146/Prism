@@ -176,3 +176,28 @@ ALTER TABLE "messages" ADD CONSTRAINT "messages_conversation_id_fkey" FOREIGN KE
 
 -- AddForeignKey
 ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- Add OCR fields to document_images table
+ALTER TABLE "document_images" 
+ADD COLUMN "ocr_text" TEXT,
+ADD COLUMN "ocr_confidence" DOUBLE PRECISION,
+ADD COLUMN "ocr_language" VARCHAR(10) DEFAULT 'eng',
+ADD COLUMN "ocr_status" VARCHAR(20) DEFAULT 'pending';
+
+-- Add source tracking to embeddings table
+ALTER TABLE "embeddings"
+ADD COLUMN "source_type" VARCHAR(20) NOT NULL DEFAULT 'pdf_text',
+ADD COLUMN "source_image_id" TEXT;
+
+-- Create indexes for better query performance
+CREATE INDEX "document_images_ocr_status_idx" ON "document_images"("ocr_status");
+CREATE INDEX "embeddings_source_type_idx" ON "embeddings"("source_type");
+CREATE INDEX "embeddings_source_image_id_idx" ON "embeddings"("source_image_id");
+
+-- Add foreign key constraint
+ALTER TABLE "embeddings" 
+ADD CONSTRAINT "embeddings_source_image_id_fkey" 
+FOREIGN KEY ("source_image_id") 
+REFERENCES "document_images"("id") 
+ON DELETE CASCADE 
+ON UPDATE CASCADE;
