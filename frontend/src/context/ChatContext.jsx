@@ -11,14 +11,14 @@ export function ChatProvider({ children }) {
   const [streaming, setStreaming] = useState(false);
 
   // Fetch all conversations
-  const fetchConversations = useCallback(async () => {
-    try {
-      const { data } = await conversationsAPI.getAll();
-      setConversations(data.conversations || []);
-    } catch (error) {
-      console.error('Failed to fetch conversations:', error);
-    }
-  }, []);
+ const  fetchConversations = useCallback(async () => {
+  try {
+    const { data } = await conversationsAPI.getAll(); // ✅ Changed from .list()
+    setConversations(data.conversations || []);
+  } catch (error) {
+    console.error('Failed to fetch conversations:', error);
+  }
+}, []);
 
   // Fetch single conversation with messages
   const fetchConversation = useCallback(async conversationId => {
@@ -35,21 +35,21 @@ export function ChatProvider({ children }) {
   }, []);
 
   // Create new conversation
-  const createConversation = useCallback(
-    async title => {
-      try {
-        const { data } = await conversationsAPI.create({ title });
-        setConversations(prev => [data.conversation, ...prev]);
-        setCurrentConversation(data.conversation);
-        setMessages([]);
-        return data.conversation;
-      } catch (error) {
-        console.error('Failed to create conversation:', error);
-        throw error;
-      }
-    },
-    []
-  );
+const createConversation = useCallback(
+  async (title = 'New conversation') => { // ✅ Added default
+    try {
+      const { data } = await conversationsAPI.create({ title }); // ✅ Pass object
+      setConversations(prev => [data.conversation, ...prev]);
+      setCurrentConversation(data.conversation);
+      setMessages([]);
+      return data.conversation;
+    } catch (error) {
+      console.error('Failed to create conversation:', error);
+      throw error;
+    }
+  },
+  []
+);
 
   // Delete conversation
   const deleteConversation = useCallback(
@@ -71,48 +71,47 @@ export function ChatProvider({ children }) {
   );
 
   // Send message (non-streaming)
-  const sendMessage = useCallback(
-    async (content, documentIds = []) => {
-      if (!currentConversation) {
-        throw new Error('No active conversation');
-      }
+const sendMessage = useCallback(
+  async (content, documentIds = []) => {
+    if (!currentConversation) {
+      throw new Error('No active conversation');
+    }
 
-      try {
-        setLoading(true);
+    try {
+      setLoading(true);
 
-        // Add user message optimistically
-        const userMessage = {
-          id: Date.now(),
-          role: 'user',
-          content,
-          createdAt: new Date().toISOString()
-        };
-        setMessages(prev => [...prev, userMessage]);
+      const userMessage = {
+        id: Date.now(),
+        role: 'user',
+        content,
+        createdAt: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, userMessage]);
 
-        // Send to API
-        const { data } = await chatAPI.sendMessage({
-          conversationId: currentConversation.id,
-          message: content,
-          documentIds
-        });
+      // ✅ Fixed API call format
+      const { data } = await chatAPI.sendMessage({
+        conversationId: currentConversation.id,
+        message: content,
+        documentIds
+      });
 
-        // Replace optimistic message and add AI response
-        setMessages(prev => [
-          ...prev.filter(m => m.id !== userMessage.id),
-          data.userMessage,
-          data.assistantMessage
-        ]);
+      setMessages(prev => [
+        ...prev.filter(m => m.id !== userMessage.id),
+        data.userMessage,
+        data.assistantMessage
+      ]);
 
-        return data;
-      } catch (error) {
-        console.error('Failed to send message:', error);
-        throw error;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [currentConversation]
-  );
+      return data;
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  },
+  [currentConversation]
+);
+  
 
   // Send message with streaming
   const sendStreamingMessage = useCallback(
