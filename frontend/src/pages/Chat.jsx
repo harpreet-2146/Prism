@@ -1,5 +1,5 @@
-import { useEffect, useState, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useChat } from '@hooks/useChat';
 import ChatMessage from '@components/chat/ChatMessage';
 import ChatInput from '@components/chat/ChatInput';
@@ -9,10 +9,10 @@ import { MessageSquare } from 'lucide-react';
 
 export default function Chat() {
   const { conversationId } = useParams();
-  const { currentConversation, messages, loading, fetchConversation, createConversation } =
-    useChat();
+  const navigate = useNavigate();
+  const { messages, loading, fetchConversation, setMessages, setCurrentConversation } = useChat();
   const messagesEndRef = useRef(null);
-  const [initialized, setInitialized] = useState(false);
+  const isInitialLoad = useRef(true);
 
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
@@ -23,33 +23,31 @@ export default function Chat() {
     scrollToBottom();
   }, [messages]);
 
-  // Load conversation or create new one
+  // Load conversation when ID changes
   useEffect(() => {
-    const initChat = async () => {
-      setInitialized(false);
-
+    const loadConversation = async () => {
       if (conversationId) {
         // Load existing conversation
         await fetchConversation(conversationId);
       } else {
-        // Create new conversation
-        const newConv = await createConversation('New conversation');
-        window.history.replaceState(null, '', `/chat/${newConv.id}`);
+        // New conversation - clear state
+        setCurrentConversation(null);
+        setMessages([]);
       }
-
-      setInitialized(true);
+      isInitialLoad.current = false;
     };
 
-    initChat();
-  }, [conversationId]);
+    loadConversation();
+  }, [conversationId, fetchConversation, setMessages, setCurrentConversation]);
 
-  if (!initialized || loading) {
+  // Show loading skeleton only on initial load
+  if (isInitialLoad.current && loading) {
     return (
       <div className="flex h-full flex-col">
         <div className="flex-1 space-y-4 overflow-y-auto p-4">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="flex gap-4">
-              <Skeleton className="h-10 w-10 rounded-full" />
+              <Skeleton className="h-10 w-10 shrink-0 rounded-full" />
               <div className="flex-1 space-y-2">
                 <Skeleton className="h-4 w-[200px]" />
                 <Skeleton className="h-4 w-full" />
@@ -81,7 +79,7 @@ export default function Chat() {
           ) : (
             // Chat messages
             <div className="space-y-6">
-              {messages.map(message => (
+              {messages.map((message) => (
                 <ChatMessage key={message.id} message={message} />
               ))}
             </div>
