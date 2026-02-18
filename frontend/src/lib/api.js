@@ -89,9 +89,9 @@ export const documentsAPI = {
 
 // Conversations API
 export const conversationsAPI = {
-  list: (params) => api.get('/chat/conversations', { params }),
+  getAll: (params) => api.get('/chat/conversations', { params }),
   getById: (conversationId) => api.get(`/chat/conversations/${conversationId}`),
-  create: () => api.post('/chat/conversations'),
+  create: (data) => api.post('/chat/conversations', data),
   delete: (conversationId) => api.delete(`/chat/conversations/${conversationId}`),
   updateTitle: (conversationId, title) => 
     api.patch(`/chat/conversations/${conversationId}/title`, { title })
@@ -99,22 +99,17 @@ export const conversationsAPI = {
 
 // Chat API
 export const chatAPI = {
-  sendMessage: (conversationId, content) => 
-    api.post(`/chat/${conversationId}/messages`, { content }),
+  sendMessage: (data) => api.post('/chat/messages', data),
   
-  streamMessage: (message, conversationId) => {
-    // Returns an EventSource for SSE streaming
+  streamMessage: (data) => {
     const token = localStorage.getItem('accessToken');
-    const url = new URL(`${API_URL}/chat/stream`);
-    
-    // Cannot use EventSource with POST, so we'll use fetch
     return fetch(`${API_URL}/chat/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ message, conversationId })
+      body: JSON.stringify(data)
     });
   }
 };
