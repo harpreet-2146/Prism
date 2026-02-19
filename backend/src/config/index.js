@@ -8,9 +8,6 @@ require('dotenv').config();
 // HELPERS
 // ================================================================
 
-/**
- * Required env var — crashes with a clear message if missing
- */
 function requireEnv(name) {
   const value = process.env[name];
   if (!value || value.trim() === '') {
@@ -21,18 +18,12 @@ function requireEnv(name) {
   return value.trim();
 }
 
-/**
- * Optional env var — returns defaultValue if not set
- */
 function optionalEnv(name, defaultValue = undefined) {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') return defaultValue;
   return value.trim();
 }
 
-/**
- * Optional boolean env var
- */
 function optionalBool(name, defaultValue = false) {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') return defaultValue;
@@ -40,9 +31,6 @@ function optionalBool(name, defaultValue = false) {
   return lower === 'true' || lower === '1' || lower === 'yes';
 }
 
-/**
- * Optional integer env var
- */
 function optionalInt(name, defaultValue) {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') return defaultValue;
@@ -54,9 +42,6 @@ function optionalInt(name, defaultValue) {
   return parsed;
 }
 
-/**
- * Optional float env var
- */
 function optionalFloat(name, defaultValue) {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') return defaultValue;
@@ -69,15 +54,15 @@ function optionalFloat(name, defaultValue) {
 }
 
 // ================================================================
-// REQUIRED VARIABLES — app won't start without these
+// REQUIRED VARIABLES
 // ================================================================
 
-const DATABASE_URL      = requireEnv('DATABASE_URL');
-const JWT_SECRET        = requireEnv('JWT_SECRET');
+const DATABASE_URL       = requireEnv('DATABASE_URL');
+const JWT_SECRET         = requireEnv('JWT_SECRET');
 const JWT_REFRESH_SECRET = requireEnv('JWT_REFRESH_SECRET');
 
 // ================================================================
-// FULL CONFIG OBJECT — everything from environment, nothing hardcoded
+// FULL CONFIG OBJECT
 // ================================================================
 
 const PORT = optionalInt('PORT', 5000);
@@ -95,26 +80,36 @@ const config = {
   // ---- JWT / Auth ----
   JWT_SECRET,
   JWT_REFRESH_SECRET,
-  JWT_ACCESS_EXPIRES_IN:  optionalEnv('JWT_ACCESS_EXPIRES_IN', '15m'),
-  JWT_REFRESH_EXPIRES_IN: optionalEnv('JWT_REFRESH_EXPIRES_IN', '7d'),
+  JWT_ACCESS_EXPIRES_IN:  optionalEnv('JWT_ACCESS_EXPIRES_IN', '1h'),    // Extended from 15m
+  JWT_REFRESH_EXPIRES_IN: optionalEnv('JWT_REFRESH_EXPIRES_IN', '30d'),  // Extended from 7d
 
   // ---- Rate Limiting ----
-  RATE_LIMIT_WINDOW_MS:    optionalInt('RATE_LIMIT_WINDOW_MS', 900000),   // 15 minutes
+  RATE_LIMIT_WINDOW_MS:    optionalInt('RATE_LIMIT_WINDOW_MS', 900000),
   RATE_LIMIT_MAX_REQUESTS: optionalInt('RATE_LIMIT_MAX_REQUESTS', 100),
 
   // ---- Groq LLM ----
-  GROQ_API_KEY:   optionalEnv('GROQ_API_KEY'),
-  GROQ_MODEL:     optionalEnv('GROQ_MODEL', 'llama-3.3-70b-versatile'),
-  GROQ_MAX_TOKENS: optionalInt('GROQ_MAX_TOKENS', 3000),
+  GROQ_API_KEY:     optionalEnv('GROQ_API_KEY'),
+  GROQ_MODEL:       optionalEnv('GROQ_MODEL', 'llama-3.3-70b-versatile'),
+  GROQ_MAX_TOKENS:  optionalInt('GROQ_MAX_TOKENS', 3000),
   GROQ_TEMPERATURE: optionalFloat('GROQ_TEMPERATURE', 0.7),
 
   // ---- HuggingFace ----
-  HF_TOKEN:          optionalEnv('HF_TOKEN'),
-  HF_EMBEDDING_MODEL: optionalEnv('HF_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
-  HF_IMAGE_MODEL:    optionalEnv('HF_IMAGE_MODEL', 'stabilityai/stable-diffusion-2-1'),
+  HF_TOKEN:                   optionalEnv('HF_TOKEN'),
+  HF_EMBEDDING_MODEL:         optionalEnv('HF_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
+  HF_IMAGE_MODEL:             optionalEnv('HF_IMAGE_MODEL', 'stabilityai/stable-diffusion-2-1'),
   ENABLE_AI_IMAGE_GENERATION: optionalBool('ENABLE_AI_IMAGE_GENERATION', false),
 
-  // ---- OCR.space API (NEW) ----
+  // ---- Tavily AI (Web Search) ----
+  TAVILY_API_KEY:      optionalEnv('TAVILY_API_KEY'),
+  TAVILY_SEARCH_DEPTH: optionalEnv('TAVILY_SEARCH_DEPTH', 'advanced'),
+  TAVILY_MAX_RESULTS:  optionalInt('TAVILY_MAX_RESULTS', 3),
+
+  // ---- Python Microservice ----
+  PYTHON_SERVICE_URL:     optionalEnv('PYTHON_SERVICE_URL'),
+  PYTHON_SERVICE_API_KEY: optionalEnv('PYTHON_SERVICE_API_KEY'),
+  PYTHON_SERVICE_TIMEOUT: optionalInt('PYTHON_SERVICE_TIMEOUT', 60000),
+
+  // ---- OCR.space API ----
   OCR_SPACE_API_KEY:  optionalEnv('OCR_SPACE_API_KEY'),
   OCR_SPACE_ENGINE:   optionalInt('OCR_SPACE_ENGINE', 2),
   OCR_SPACE_LANGUAGE: optionalEnv('OCR_SPACE_LANGUAGE', 'eng'),
@@ -132,8 +127,8 @@ const config = {
   PDF_IMAGE_QUALITY:    optionalInt('PDF_IMAGE_QUALITY', 85),
 
   // ---- Exports (Puppeteer PDF) ----
-  EXPORT_TEMP_DIR:      optionalEnv('EXPORT_TEMP_DIR', './exports'),
-  EXPORT_TIMEOUT_MS:    optionalInt('EXPORT_TIMEOUT_MS', 30000),
+  EXPORT_TEMP_DIR:       optionalEnv('EXPORT_TEMP_DIR', './exports'),
+  EXPORT_TIMEOUT_MS:     optionalInt('EXPORT_TIMEOUT_MS', 30000),
   EXPORT_MAX_CONCURRENT: optionalInt('EXPORT_MAX_CONCURRENT', 3),
 
   // ---- Logging ----
@@ -142,11 +137,11 @@ const config = {
 
 // ================================================================
 // FEATURE AVAILABILITY WARNINGS
-// These don't crash the app — they just disable the feature gracefully
 // ================================================================
 
 const warnings = [];
 
+// Critical features
 if (!config.GROQ_API_KEY) {
   warnings.push('GROQ_API_KEY not set — AI chat features will not work');
 }
@@ -156,6 +151,16 @@ if (!config.HF_TOKEN) {
 if (!config.OCR_SPACE_API_KEY) {
   warnings.push('OCR_SPACE_API_KEY not set — image text extraction will not work (may reduce search accuracy)');
 }
+
+// Optional enhancements
+if (!config.TAVILY_API_KEY) {
+  warnings.push('TAVILY_API_KEY not set — web search enhancement disabled (chat will still work with PDF only)');
+}
+if (!config.PYTHON_SERVICE_URL) {
+  warnings.push('PYTHON_SERVICE_URL not set — using Node.js processing (Python service recommended for faster batch processing)');
+}
+
+// Image features
 if (!config.UNSPLASH_ACCESS_KEY && !config.PEXELS_API_KEY) {
   warnings.push('UNSPLASH_ACCESS_KEY and PEXELS_API_KEY not set — image fallbacks disabled');
 }
