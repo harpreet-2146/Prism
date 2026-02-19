@@ -49,11 +49,35 @@ export const useDocuments = () => {
         if (updatedDoc.status === 'completed' || updatedDoc.status === 'failed') {
           clearInterval(interval);
           delete pollingIntervalsRef.current[documentId];
+          
+          console.log('✅ Stopped polling for document:', documentId);
         }
       } catch (err) {
         console.error('Failed to poll document status:', err);
-        clearInterval(interval);
-        delete pollingIntervalsRef.current[documentId];
+        
+        // ✅ FIX: Stop polling if document not found (404)
+        if (err.response?.status === 404) {
+          console.warn('⚠️  Document not found, stopping poll:', documentId);
+          
+          // Remove from state
+          setDocuments(prev => prev.filter(doc => doc.id !== documentId));
+          
+          // Stop polling
+          clearInterval(interval);
+          delete pollingIntervalsRef.current[documentId];
+        } else {
+          // For other errors, stop polling after 3 consecutive failures
+          const failureKey = `${documentId}_failures`;
+          pollingIntervalsRef.current[failureKey] = 
+            (pollingIntervalsRef.current[failureKey] || 0) + 1;
+          
+          if (pollingIntervalsRef.current[failureKey] >= 3) {
+            console.error('❌ Too many polling failures, stopping:', documentId);
+            clearInterval(interval);
+            delete pollingIntervalsRef.current[documentId];
+            delete pollingIntervalsRef.current[failureKey];
+          }
+        }
       }
     }, 3000); // Poll every 3 seconds
 
