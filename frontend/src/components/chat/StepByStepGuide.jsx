@@ -3,10 +3,23 @@ import remarkGfm from 'remark-gfm';
 import { Badge } from '@components/ui/badge';
 
 export default function StepByStepGuide({ content, images = [] }) {
+  // Parse images if they're a JSON string
+  let parsedImages = [];
+  try {
+    if (typeof images === 'string') {
+      parsedImages = JSON.parse(parsedImages);
+    } else if (Array.isArray(parsedImages)) {
+      parsedImages = images;
+    }
+  } catch (e) {
+    console.error('❌ Failed to parse images:', e);
+    parsedImages = [];
+  }
+
   console.log('🎨 StepByStepGuide render:', { 
     contentLength: content?.length, 
-    imagesCount: images?.length,
-    images: images 
+    imagesCount: parsedImages?.length,
+    images: parsedImages 
   }); // DEBUG
 
   // Try to parse JSON response from backend
@@ -84,13 +97,13 @@ export default function StepByStepGuide({ content, images = [] }) {
         )}
 
         {/* Document images - WITH DEBUG */}
-        {images && images.length > 0 ? (
+        {images && parsedImages.length > 0 ? (
           <div className="mt-4 space-y-3">
             <h4 className="text-sm font-semibold">
-              📄 Referenced Screenshots from Documents ({images.length} images):
+              📄 Referenced Screenshots from Documents ({parsedImages.length} parsedImages):
             </h4>
             <div className="grid gap-3 sm:grid-cols-2">
-              {images.map((image, idx) => {
+              {parsedImages.map((image, idx) => {
                 console.log(`🖼️  Rendering image ${idx}:`, image); // DEBUG
                 
                 return (
@@ -119,7 +132,7 @@ export default function StepByStepGuide({ content, images = [] }) {
         ) : (
           <div className="mt-4 rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">
             ℹ️ No images available for this response
-            {console.log('⚠️  No images to display. Images array:', images)}
+            {console.log('⚠️  No images to display. Images array:', parsedImages)}
           </div>
         )}
       </div>
@@ -134,11 +147,11 @@ export default function StepByStepGuide({ content, images = [] }) {
       </div>
 
       {/* Document images */}
-      {images && images.length > 0 ? (
+      {images && parsedImages.length > 0 ? (
         <div className="space-y-3">
-          <h4 className="text-sm font-semibold">Referenced Screenshots ({images.length}):</h4>
+          <h4 className="text-sm font-semibold">Referenced Screenshots ({parsedImages.length}):</h4>
           <div className="grid gap-3 sm:grid-cols-2">
-            {images.map((image, idx) => (
+            {parsedImages.map((image, idx) => (
               <div key={idx} className="overflow-hidden rounded-lg border">
                 <img
                   src={image.url}
