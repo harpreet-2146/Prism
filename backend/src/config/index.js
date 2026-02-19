@@ -127,7 +127,7 @@ const config = {
   UPLOAD_DIR:           optionalEnv('UPLOAD_DIR', './uploads'),
   MAX_FILE_SIZE_MB:     optionalInt('MAX_FILE_SIZE_MB', 50),
   ALLOWED_MIME_TYPES:   optionalEnv('ALLOWED_MIME_TYPES', 'application/pdf'),
-  MAX_PAGES_TO_EXTRACT: optionalInt('MAX_PAGES_TO_EXTRACT', 50),
+  MAX_PAGES_TO_EXTRACT: optionalInt('MAX_PAGES_TO_EXTRACT', 500),
   PDF_IMAGE_SCALE:      optionalFloat('PDF_IMAGE_SCALE', 1.5),
   PDF_IMAGE_QUALITY:    optionalInt('PDF_IMAGE_QUALITY', 85),
 
