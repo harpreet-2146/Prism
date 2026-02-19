@@ -1,4 +1,3 @@
-// backend/src/services/vector/embedding-search.service.js
 'use strict';
 
 const { HfInference } = require('@huggingface/inference');
@@ -14,15 +13,13 @@ class EmbeddingSearchService {
     this.model = config.HF_EMBEDDING_MODEL;
   }
 
-  /**
-   * Create embeddings for document chunks and store in PostgreSQL
-   * @param {string} userId - User ID
-   * @param {string} documentId - Document ID
-   * @param {Array} chunks - Array of {text, chunkIndex, pageNumber, sourceType, sourceImageId}
-   */
+  /* ================================================================
+     INDEX DOCUMENT CHUNKS
+  ================================================================= */
+
   async indexDocumentChunks(userId, documentId, chunks) {
     if (!this.hf) {
-      logger.warn('HuggingFace token not configured, skipping embedding creation', {
+      logger.warn('HF token not configured, skipping embedding creation', {
         documentId,
         component: 'embedding-search'
       });
@@ -43,7 +40,6 @@ class EmbeddingSearchService {
         const chunk = chunks[i];
 
         try {
-          // Create embedding via HuggingFace API
           const embedding = await this._createEmbedding(chunk.text);
 
           embeddingRecords.push({
@@ -52,12 +48,11 @@ class EmbeddingSearchService {
             chunkIndex: chunk.chunkIndex,
             pageNumber: chunk.pageNumber,
             text: chunk.text,
-            sourceType: chunk.sourceType, // 'pdf_text' or 'image_ocr'
-            sourceImageId: chunk.sourceImageId, // null for pdf_text, imageId for image_ocr
-            embedding: embedding
+            sourceType: chunk.sourceType,
+            sourceImageId: chunk.sourceImageId,
+            embedding
           });
 
-          // Log progress every 10 chunks
           if ((i + 1) % 10 === 0) {
             logger.info('Embedding progress', {
               documentId,
@@ -67,31 +62,26 @@ class EmbeddingSearchService {
             });
           }
 
-          // Small delay to avoid rate limits
           await this._sleep(100);
 
-        } catch (error) {
-          logger.error('Failed to create embedding for chunk', {
+        } catch (err) {
+          logger.error('Chunk embedding failed', {
             documentId,
             chunkIndex: chunk.chunkIndex,
-            error: error.message,
+            error: err.message,
             component: 'embedding-search'
           });
-          // Continue with other chunks
         }
       }
 
-      // Batch insert all embeddings
       if (embeddingRecords.length > 0) {
         await prisma.embedding.createMany({
           data: embeddingRecords
         });
 
-        logger.info('Embeddings created and stored', {
+        logger.info('Embeddings stored', {
           documentId,
           totalEmbeddings: embeddingRecords.length,
-          pdfTextEmbeddings: embeddingRecords.filter(e => e.sourceType === 'pdf_text').length,
-          imageOcrEmbeddings: embeddingRecords.filter(e => e.sourceType === 'image_ocr').length,
           component: 'embedding-search'
         });
       }
@@ -107,16 +97,13 @@ class EmbeddingSearchService {
     }
   }
 
-  /**
-   * Search for relevant document chunks using vector similarity
-   * @param {string} userId - User ID
-   * @param {string} query - Search query
-   * @param {number} topK - Number of results to return
-   * @returns {Array} - Array of {text, pageNumber, documentId, sourceType, sourceImageId, score}
-   */
-  async search(userId, query, topK = 10) {
+  /* ================================================================
+     SEARCH (RAG CORE)
+  ================================================================= */
+
+  async search(userId, query, topK = 5) {
     if (!this.hf) {
-      logger.warn('HuggingFace token not configured, search unavailable', {
+      logger.warn('HF token not configured, search unavailable', {
         component: 'embedding-search'
       });
       return [];
@@ -130,24 +117,18 @@ class EmbeddingSearchService {
         component: 'embedding-search'
       });
 
-      // Create embedding for the query
       const queryEmbedding = await this._createEmbedding(query);
 
-      // Get all embeddings for user
+      // ✅ FIX: Include sourceImage relation to get actual file paths
       const userEmbeddings = await prisma.embedding.findMany({
         where: { userId },
-        select: {
-          id: true,
-          text: true,
-          pageNumber: true,
-          documentId: true,
-          sourceType: true,
-          sourceImageId: true,
-          embedding: true
+        include: {
+          document: true,
+          sourceImage: true // ✅ FIXED: Changed from "image" to "sourceImage"
         }
       });
 
-      if (userEmbeddings.length === 0) {
+      if (!userEmbeddings.length) {
         logger.info('No embeddings found for user', {
           userId,
           component: 'embedding-search'
@@ -155,31 +136,39 @@ class EmbeddingSearchService {
         return [];
       }
 
-      // Calculate cosine similarity for each embedding
-      const results = userEmbeddings.map(emb => {
-        const score = this._cosineSimilarity(queryEmbedding, emb.embedding);
+      const scored = userEmbeddings.map(e => {
+        const score = this._cosineSimilarity(queryEmbedding, e.embedding);
+
+        // ✅ FIX: Build correct image URL from storagePath
+        let imageUrl = null;
+        if (e.sourceImage?.storagePath) { // ✅ FIXED: Changed from "e.image" to "e.sourceImage"
+          // Convert Windows backslashes to forward slashes
+          const path = e.sourceImage.storagePath.replace(/\\/g, '/'); // ✅ FIXED: Changed from "e.image" to "e.sourceImage"
+          imageUrl = `${config.BASE_URL}/${path}`;
+        }
+
         return {
-          id: emb.id,
-          text: emb.text,
-          pageNumber: emb.pageNumber,
-          documentId: emb.documentId,
-          sourceType: emb.sourceType,
-          sourceImageId: emb.sourceImageId,
+          id: e.id,
+          text: e.text,
+          pageNumber: e.pageNumber,
+          documentId: e.documentId,
+          documentName: e.document?.name || 'Unknown Document',
+          sourceType: e.sourceType,
+          sourceImageId: e.sourceImageId,
+          imageUrl, // ✅ Now has correct URL
           score
         };
       });
 
-      // Sort by score (highest first) and take top K
-      results.sort((a, b) => b.score - a.score);
-      const topResults = results.slice(0, topK);
+      scored.sort((a, b) => b.score - a.score);
+
+      const topResults = scored.slice(0, topK);
 
       logger.info('Search complete', {
         userId,
         totalEmbeddings: userEmbeddings.length,
-        topScore: topResults[0]?.score.toFixed(3),
-        resultsReturned: topResults.length,
-        pdfTextResults: topResults.filter(r => r.sourceType === 'pdf_text').length,
-        imageOcrResults: topResults.filter(r => r.sourceType === 'image_ocr').length,
+        returned: topResults.length,
+        topScore: topResults[0]?.score?.toFixed(3),
         component: 'embedding-search'
       });
 
@@ -197,9 +186,10 @@ class EmbeddingSearchService {
     }
   }
 
-  /**
-   * Delete all embeddings for a document
-   */
+  /* ================================================================
+     DELETE DOCUMENT EMBEDDINGS
+  ================================================================= */
+
   async deleteDocumentEmbeddings(documentId) {
     try {
       const result = await prisma.embedding.deleteMany({
@@ -213,8 +203,9 @@ class EmbeddingSearchService {
       });
 
       return result;
+
     } catch (error) {
-      logger.error('Failed to delete embeddings', {
+      logger.error('Delete embeddings failed', {
         documentId,
         error: error.message,
         component: 'embedding-search'
@@ -223,17 +214,13 @@ class EmbeddingSearchService {
     }
   }
 
-  /**
-   * Get embeddings count for a document
-   */
   async getDocumentEmbeddingCount(documentId) {
     try {
-      const count = await prisma.embedding.count({
+      return await prisma.embedding.count({
         where: { documentId }
       });
-      return count;
     } catch (error) {
-      logger.error('Failed to count embeddings', {
+      logger.error('Count embeddings failed', {
         documentId,
         error: error.message,
         component: 'embedding-search'
@@ -242,10 +229,10 @@ class EmbeddingSearchService {
     }
   }
 
-  /**
-   * Create embedding vector using HuggingFace API
-   * @private
-   */
+  /* ================================================================
+     INTERNAL UTILITIES
+  ================================================================= */
+
   async _createEmbedding(text) {
     try {
       const response = await this.hf.featureExtraction({
@@ -253,13 +240,13 @@ class EmbeddingSearchService {
         inputs: text
       });
 
-      // Response is already an array of floats
-      return response;
+      return Array.isArray(response[0])
+        ? response[0]
+        : response;
 
     } catch (error) {
       logger.error('Embedding creation failed', {
         model: this.model,
-        textLength: text.length,
         error: error.message,
         component: 'embedding-search'
       });
@@ -267,50 +254,32 @@ class EmbeddingSearchService {
     }
   }
 
-  /**
-   * Calculate cosine similarity between two vectors
-   * @private
-   */
-  _cosineSimilarity(vecA, vecB) {
-    if (!Array.isArray(vecA) || !Array.isArray(vecB)) {
-      return 0;
-    }
+  _cosineSimilarity(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+    if (a.length !== b.length) return 0;
 
-    if (vecA.length !== vecB.length) {
-      return 0;
-    }
-
-    let dotProduct = 0;
+    let dot = 0;
     let normA = 0;
     let normB = 0;
 
-    for (let i = 0; i < vecA.length; i++) {
-      dotProduct += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
     }
 
     normA = Math.sqrt(normA);
     normB = Math.sqrt(normB);
 
-    if (normA === 0 || normB === 0) {
-      return 0;
-    }
+    if (!normA || !normB) return 0;
 
-    return dotProduct / (normA * normB);
+    return dot / (normA * normB);
   }
 
-  /**
-   * Sleep utility for rate limiting
-   * @private
-   */
   _sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /**
-   * Health check
-   */
   healthCheck() {
     return {
       configured: Boolean(this.hf),
