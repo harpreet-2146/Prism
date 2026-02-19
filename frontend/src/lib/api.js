@@ -183,27 +183,40 @@ export const chatAPI = {
   sendMessage: (conversationId, message) =>
     api.post(`/chat/conversations/${conversationId}/messages`, { message }),
 
-  // Stream message with SSE
+  // ✅ FIXED: Stream message with SSE using GET + query params
   streamMessage: (conversationId, message, onChunk, onComplete, onError) => {
     const token = localStorage.getItem('accessToken');
-    const url = `${API_BASE_URL}/chat/conversations/${conversationId}/stream`;
+    
+    if (!token) {
+      onError({ error: 'Not authenticated' });
+      return null;
+    }
+    
+    // ✅ FIX: Handle null/undefined conversationId for new chats
+    const chatId = conversationId || 'new';
+    
+    // ✅ FIX: Send message and token as query parameters (EventSource limitation)
+    const encodedMessage = encodeURIComponent(message);
+    const encodedToken = encodeURIComponent(token);
+    const url = `${API_BASE_URL}/chat/conversations/${chatId}/stream?message=${encodedMessage}&token=${encodedToken}`;
 
-    const eventSource = new EventSource(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
+    console.log('🌐 Opening SSE stream:', { conversationId: chatId });
+
+    const eventSource = new EventSource(url);
 
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('📩 SSE event received:', data.type);
 
         if (data.type === 'token') {
-          onChunk(data.content);
+          onChunk(data);
         } else if (data.type === 'done') {
+          console.log('✅ SSE stream complete:', data);
           onComplete(data);
           eventSource.close();
         } else if (data.type === 'error') {
+          console.error('❌ SSE error:', data);
           onError(data);
           eventSource.close();
         }
@@ -213,7 +226,7 @@ export const chatAPI = {
     };
 
     eventSource.onerror = (error) => {
-      console.error('SSE error:', error);
+      console.error('SSE connection error:', error);
       onError({ error: 'Connection lost' });
       eventSource.close();
     };
