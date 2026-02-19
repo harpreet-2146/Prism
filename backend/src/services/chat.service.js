@@ -7,6 +7,7 @@ const config = require('../config');
 const { logger } = require('../utils/logger');
 const embeddingSearch = require('./vector/embedding-search.service');
 const imageExtractor = require('./pdf/image-extractor.service');
+const tavilyService = require('./tavily.service'); // 🆕 NEW
 
 const prisma = new PrismaClient();
 
@@ -38,7 +39,7 @@ class ChatService {
         include: {
           messages: {
             orderBy: { createdAt: 'asc' },
-            take: 20 // Last 20 messages for context
+            take: 20
           }
         }
       });
@@ -56,21 +57,48 @@ class ChatService {
         }
       });
 
-      // Get relevant context from documents
+      // 🆕 STEP 1: Get context from PDFs (ALWAYS)
       const { textContext, images, sources } = await this._getRelevantContext(userId, message);
 
+      // 🆕 STEP 2: Decide if web search is needed
+      const needsWebSearch = tavilyService.shouldSearchWeb(message);
+      let webResults = [];
+
+      if (needsWebSearch) {
+        logger.info('Web search triggered for query', {
+          message: message.substring(0, 50),
+          component: 'chat-service'
+        });
+        
+        // Parse PDF context for web search
+        const pdfContext = sources.map(s => ({
+          text: s.text || '',
+          sapModule: s.sapModule || null
+        }));
+
+        webResults = await tavilyService.search(message, pdfContext);
+      }
+
+      // 🆕 STEP 3: Build enhanced system prompt
+      const systemPrompt = this._buildEnhancedSystemPrompt(webResults.length > 0);
+      
+      // 🆕 STEP 4: Build combined context
+      const contextPrompt = this._buildCombinedContext(textContext, images, webResults);
+
       // Build messages for Groq
-      const systemPrompt = this._buildSystemPrompt();
-      const contextPrompt = this._buildContextPrompt(textContext, images);
-      const conversationHistory = conversation.messages.map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }));
+      const previousMessages = await prisma.message.findMany({
+        where: { conversationId: conversation.id },
+        orderBy: { createdAt: 'asc' },
+        take: 10
+      });
 
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'system', content: contextPrompt },
-        ...conversationHistory,
+        ...previousMessages.slice(0, -1).map(msg => ({
+          role: msg.role,
+          content: msg.content
+        })),
         { role: 'user', content: message }
       ];
 
@@ -78,6 +106,7 @@ class ChatService {
       logger.info('Calling Groq API', {
         conversationId,
         model: this.model,
+        hasWebResults: webResults.length > 0,
         component: 'chat-service'
       });
 
@@ -92,32 +121,24 @@ class ChatService {
       const assistantMessage = completion.choices[0]?.message?.content || '';
       const tokensUsed = completion.usage?.total_tokens || 0;
 
-      // Try to parse JSON response (if AI returned structured data)
-      let parsedResponse = null;
-      try {
-        const jsonMatch = assistantMessage.match(/```json\n([\s\S]+?)\n```/);
-        if (jsonMatch) {
-          parsedResponse = JSON.parse(jsonMatch[1]);
-        }
-      } catch {
-        // Not JSON, use plain text
-      }
-
-      // Extract structured fields if available
-      const steps = parsedResponse?.steps || null;
-      const diagrams = parsedResponse?.diagrams || null;
-
-      // Save assistant message
+      // Save assistant message with metadata
       const savedMessage = await prisma.message.create({
         data: {
           conversationId,
           role: 'assistant',
           content: assistantMessage,
           sources: sources.length > 0 ? sources : null,
-          steps,
-          diagrams,
-          images: images.length > 0 ? images : null,
-          tokensUsed
+          images: images.length > 0 ? JSON.stringify(images) : null,
+          tokensUsed,
+          // 🆕 Store web search metadata
+          metadata: webResults.length > 0 ? {
+            webSearchUsed: true,
+            webResultsCount: webResults.length,
+            webSources: webResults.map(r => ({
+              title: r.title,
+              url: r.url
+            }))
+          } : null
         }
       });
 
@@ -133,7 +154,7 @@ class ChatService {
       logger.info('Chat message processed', {
         conversationId,
         tokensUsed,
-        hasSteps: Boolean(steps),
+        webSearchUsed: webResults.length > 0,
         imagesReturned: images.length,
         component: 'chat-service'
       });
@@ -153,12 +174,11 @@ class ChatService {
   }
 
   /**
-   * Get relevant context from user's documents (REVISED WITH OCR)
+   * Get relevant context from user's documents
    * @private
    */
   async _getRelevantContext(userId, message) {
     try {
-      // Vector search returns chunks from BOTH pdf_text and image_ocr
       const searchResults = await embeddingSearch.search(userId, message, 10);
 
       if (searchResults.length === 0) {
@@ -169,19 +189,18 @@ class ChatService {
         };
       }
 
-      // Build text context from all chunks
       const textContext = searchResults
-        .map((result, idx) => `[${idx + 1}] ${result.text}`)
+        .map((result, idx) =>
+          `[${idx + 1}] From "${result.documentName}" (Page ${result.pageNumber}):\n${result.text}`
+        )
         .join('\n\n');
 
-      // Get unique image IDs from chunks that came from image OCR
       const imageIds = [...new Set(
         searchResults
           .filter(r => r.sourceImageId)
           .map(r => r.sourceImageId)
       )];
 
-      // Fetch full image details
       const images = [];
       if (imageIds.length > 0) {
         const imageRecords = await prisma.documentImage.findMany({
@@ -193,7 +212,7 @@ class ChatService {
             ocrText: true,
             ocrConfidence: true
           },
-          take: 10 // Limit to 10 images max
+          take: 10
         });
 
         for (const img of imageRecords) {
@@ -208,20 +227,19 @@ class ChatService {
         }
       }
 
-      // Build sources array
       const sources = searchResults.map(result => ({
         documentId: result.documentId,
+        documentName: result.documentName,
         pageNumber: result.pageNumber,
         sourceType: result.sourceType,
-        score: result.score
+        score: result.score,
+        text: result.text
       }));
 
-      logger.info('Context retrieved', {
+      logger.info('PDF context retrieved', {
         userId,
         chunksFound: searchResults.length,
         imagesFound: images.length,
-        pdfTextChunks: searchResults.filter(r => r.sourceType === 'pdf_text').length,
-        ocrChunks: searchResults.filter(r => r.sourceType === 'image_ocr').length,
         component: 'chat-service'
       });
 
@@ -242,49 +260,81 @@ class ChatService {
   }
 
   /**
-   * Build system prompt
+   * 🆕 Build enhanced system prompt (with or without web search)
    * @private
    */
-  _buildSystemPrompt() {
-    return `You are PRISM, an intelligent SAP assistant. You help users understand SAP processes by providing clear, step-by-step instructions.
+  _buildEnhancedSystemPrompt(hasWebResults) {
+    let prompt = `You are PRISM, an expert SAP assistant with access to technical documentation`;
+    
+    if (hasWebResults) {
+      prompt += ` and web search results from SAP community forums and official documentation`;
+    }
+    
+    prompt += `.
 
-When answering:
-1. Be concise and practical
-2. Reference specific transaction codes (tcodes)
-3. If images are available, mention which screenshots to look at
-4. Provide step-by-step instructions when appropriate
-5. Cite page numbers from source documents
+RESPONSE STYLE:
+- Provide detailed, step-by-step explanations in your own words
+- Include brief citations for credibility (e.g., "according to page 14..." or "based on SAP Community discussion...")
+- When screenshots are available, reference them naturally within the relevant step
+- Balance technical accuracy with clear, practical guidance`;
 
-If you don't know the answer, say so clearly. Never make up information about SAP.`;
+    if (hasWebResults) {
+      prompt += `
+- When using web results, clearly distinguish between information from user's documents vs. external sources
+- Prioritize official SAP documentation over community forums`;
+    }
+
+    prompt += `
+
+FORMAT FOR STEP-BY-STEP INSTRUCTIONS:
+1. **Step Name**: Detailed explanation of what to do and why. [Reference: Source]
+2. **Next Step**: Clear instructions with context. [Reference: Source]
+
+Always integrate citations naturally without disrupting the flow of explanation.`;
+
+    return prompt;
   }
 
   /**
-   * Build context prompt with available documents and images
+   * 🆕 Build combined context from PDF + web results
    * @private
    */
-  _buildContextPrompt(textContext, images) {
-    let prompt = '';
+  _buildCombinedContext(textContext, images, webResults) {
+    let context = '';
 
+    // Add PDF context
     if (textContext) {
-      prompt += `DOCUMENT CONTEXT:\n${textContext}\n\n`;
+      context += `📄 INFORMATION FROM YOUR UPLOADED DOCUMENTS:\n\n${textContext}\n\n`;
     }
 
-    if (images.length > 0) {
-      prompt += `AVAILABLE SCREENSHOTS (from SAP documents):\n`;
-      images.forEach((img, idx) => {
-        prompt += `[Image ${idx + 1}] Page ${img.pageNumber}\n`;
-        prompt += `  OCR Text: ${img.ocrText}\n`;
-        prompt += `  Confidence: ${(img.ocrConfidence * 100).toFixed(0)}%\n`;
-        prompt += `  URL: ${img.url}\n\n`;
+    // Add web results
+    if (webResults && webResults.length > 0) {
+      context += `🌐 ADDITIONAL INFORMATION FROM SAP COMMUNITY & DOCUMENTATION:\n\n`;
+      webResults.forEach((result, idx) => {
+        context += `[Web Source ${idx + 1}] ${result.title}\n`;
+        context += `${result.snippet}\n`;
+        context += `URL: ${result.url}\n\n`;
       });
-      prompt += `You can reference these images in your response by their number [Image 1], [Image 2], etc.\n\n`;
     }
 
-    if (!textContext && images.length === 0) {
-      prompt = `No relevant documents found in the knowledge base. Answer based on general SAP knowledge or ask the user to upload relevant documents.`;
+    // Add image context
+    if (images && images.length > 0) {
+      context += `📸 AVAILABLE SCREENSHOTS (${images.length}):\n\n`;
+      images.forEach((img, idx) => {
+        context += `[Image ${idx + 1}] Page ${img.pageNumber}\n`;
+        if (img.ocrText) {
+          context += `  OCR Text: ${img.ocrText}\n`;
+        }
+        context += `  URL: ${img.url}\n\n`;
+      });
+      context += `You can reference these images in your response by their number [Image 1], [Image 2], etc.\n\n`;
     }
 
-    return prompt;
+    if (!textContext && webResults.length === 0) {
+      context = `No relevant documents found in the knowledge base. Answer based on general SAP knowledge or ask the user to upload relevant documents.`;
+    }
+
+    return context;
   }
 
   /**
@@ -413,8 +463,11 @@ If you don't know the answer, say so clearly. Never make up information about SA
    */
   healthCheck() {
     return {
-      configured: Boolean(this.groq),
-      model: this.model,
+      groq: {
+        configured: Boolean(this.groq),
+        model: this.model
+      },
+      tavily: tavilyService.healthCheck(),
       status: this.groq ? 'ready' : 'not_configured'
     };
   }
