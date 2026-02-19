@@ -14,7 +14,7 @@ export function ChatProvider({ children }) {
   const fetchConversations = useCallback(async () => {
     try {
       const { data } = await conversationsAPI.getAll();
-      setConversations(data.data?.conversations || []);
+      setConversations(data.data?.conversations || data.data || []);
     } catch (error) {
       console.error('Failed to fetch conversations:', error);
       setConversations([]);
@@ -29,8 +29,12 @@ export function ChatProvider({ children }) {
       
       console.log('📥 Loaded conversation:', data.data); // DEBUG
       
-      setCurrentConversation(data.data.conversation);
-      setMessages(data.data.messages || []);
+      // ✅ Handle nested data structure
+      const conversation = data.data?.conversation || data.data;
+      const messagesData = data.data?.messages || [];
+      
+      setCurrentConversation(conversation);
+      setMessages(messagesData);
     } catch (error) {
       console.error('Failed to fetch conversation:', error);
       setCurrentConversation(null);
@@ -66,99 +70,100 @@ export function ChatProvider({ children }) {
   }, [currentConversation]);
 
   // Send message with streaming
- // Send message with streaming
-const sendStreamingMessage = useCallback(async (content, conversationId = null) => {
-  console.log('📤 Sending message:', { content, conversationId }); // DEBUG
-  
-  // Add user message immediately
-  const userMessage = {
-    id: `temp-user-${Date.now()}`,
-    role: 'user',
-    content,
-    createdAt: new Date().toISOString()
-  };
-  setMessages((prev) => [...prev, userMessage]);
+  const sendStreamingMessage = useCallback(async (content, conversationId = null) => {
+    console.log('📤 Sending message:', { content, conversationId }); // DEBUG
+    
+    // Add user message immediately
+    const userMessage = {
+      id: `temp-user-${Date.now()}`,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, userMessage]);
 
-  // Add placeholder for assistant message
-  const assistantMessageId = `temp-assistant-${Date.now()}`;
-  const assistantMessage = {
-    id: assistantMessageId,
-    role: 'assistant',
-    content: '',
-    streaming: true,
-    images: [],
-    createdAt: new Date().toISOString()
-  };
-  setMessages((prev) => [...prev, assistantMessage]);
-  setStreaming(true);
+    // Add placeholder for assistant message
+    const assistantMessageId = `temp-assistant-${Date.now()}`;
+    const assistantMessage = {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      images: [],
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, assistantMessage]);
+    setStreaming(true);
 
-  // ✅ FIX: Get the actual conversation ID
-  const actualConversationId = conversationId || currentConversation?.id;
+    // ✅ FIX: Get the actual conversation ID (can be null for new conversations)
+    const actualConversationId = conversationId || currentConversation?.id;
 
-  return new Promise((resolve, reject) => {
-    chatAPI.streamMessage(
-      actualConversationId, // ✅ PASS STRING ID, NOT OBJECT!
-      content,              // ✅ PASS MESSAGE STRING
-      // onChunk - append content as it streams
-      (chunk) => {
-        if (chunk.content) {
+    return new Promise((resolve, reject) => {
+      chatAPI.streamMessage(
+        actualConversationId, // ✅ Can be null, backend will create new conversation
+        content,              // ✅ Message string
+        // onChunk - append content as it streams
+        (chunk) => {
+          if (chunk.content) {
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, content: msg.content + chunk.content }
+                  : msg
+              )
+            );
+          }
+        },
+        // onComplete - finalize the message
+        (data) => {
+          console.log('🎯 SSE Complete - Full response data:', data);
+          console.log('🖼️  Images in response:', data.images);
+          
           setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, content: msg.content + chunk.content }
-                : msg
-            )
+            prev.map((msg) => {
+              if (msg.id === assistantMessageId) {
+                // ✅ CRITICAL FIX: Extract images from the correct location
+                const images = data.images || [];
+                
+                console.log('✅ Setting message images:', images);
+                
+                return {
+                  ...msg,
+                  id: data.messageId || msg.id,
+                  streaming: false,
+                  sources: data.sources || [],
+                  images: images // ✅ PASS IMAGES TO MESSAGE
+                };
+              }
+              return msg;
+            })
           );
-        }
-      },
-      // onComplete - finalize the message
-      (data) => {
-        console.log('🎯 SSE Complete - Full response data:', data);
-        console.log('🖼️  Images in response:', data.images);
-        
-        setMessages((prev) =>
-          prev.map((msg) => {
-            if (msg.id === assistantMessageId) {
-              const images = data.images || data.parsed?.images || [];
-              
-              console.log('✅ Setting message images:', images);
-              
-              return {
-                ...msg,
-                id: data.messageId || msg.id,
-                streaming: false,
-                sources: data.sources || [],
-                images: images
-              };
-            }
-            return msg;
-          })
-        );
 
-        // Update conversation if it was just created
-        if (data.conversationId && !currentConversation) {
-          console.log('📝 Created new conversation:', data.conversationId);
-          setCurrentConversation({ id: data.conversationId });
-          window.history.replaceState(null, '', `/chat/${data.conversationId}`);
-        }
+          // Update conversation if it was just created
+          if (data.conversationId && !currentConversation) {
+            console.log('📝 Created new conversation:', data.conversationId);
+            setCurrentConversation({ id: data.conversationId });
+            window.history.replaceState(null, '', `/chat/${data.conversationId}`);
+          }
 
-        fetchConversations();
-        
-        setStreaming(false);
-        resolve(data);
-      },
-      // onError
-      (error) => {
-        console.error('❌ Streaming error:', error);
-        
-        setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessageId));
-        
-        setStreaming(false);
-        reject(error);
-      }
-    );
-  });
-}, [currentConversation, fetchConversations]);
+          fetchConversations();
+          
+          setStreaming(false);
+          resolve(data);
+        },
+        // onError
+        (error) => {
+          console.error('❌ Streaming error:', error);
+          
+          setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessageId));
+          
+          setStreaming(false);
+          reject(error);
+        }
+      );
+    });
+  }, [currentConversation, fetchConversations]);
+
   // Send message without streaming (fallback)
   const sendMessage = useCallback(async (content, conversationId = null) => {
     const userMessage = {
