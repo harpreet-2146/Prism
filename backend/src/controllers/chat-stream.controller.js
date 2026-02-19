@@ -4,6 +4,7 @@
 const { PrismaClient } = require('@prisma/client');
 const Groq = require('groq-sdk');
 const embeddingSearchService = require('../services/vector/embedding-search.service');
+const tavilyService = require('../services/tavily.service'); // 🆕 NEW
 
 const prisma = new PrismaClient();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -83,13 +84,34 @@ const streamChatResponse = async (req, res) => {
       }
     });
 
-    // 🔥 Corrected embedding search call
-    console.log('🔍 Searching for relevant context...');
-    const relevantChunks =
-      await embeddingSearchService.search(userId, message, 5);
+    // 🆕 STEP 1: Search PDFs (ALWAYS)
+    console.log('🔍 Searching PDF documents...');
+    const relevantChunks = await embeddingSearchService.search(userId, message, 10);
+    console.log(`📚 PDF Context: ${relevantChunks.length} chunks`);
 
-    console.log(`📚 Context retrieved: ${relevantChunks.length} chunks`);
+    // 🆕 STEP 2: Check if web search needed
+    const needsWebSearch = tavilyService.shouldSearchWeb(message);
+    let webResults = [];
 
+    if (needsWebSearch) {
+      console.log('🌐 Web search triggered');
+      
+      res.write(`data: ${JSON.stringify({
+        type: 'status',
+        message: 'Searching SAP community and documentation...'
+      })}\n\n`);
+      res.flush?.();
+
+      const pdfContext = relevantChunks.map(chunk => ({
+        text: chunk.text,
+        sapModule: chunk.sapModule
+      }));
+
+      webResults = await tavilyService.search(message, pdfContext);
+      console.log(`🌐 Web results: ${webResults.length} found`);
+    }
+
+    // Extract images from PDF context
     const images = relevantChunks
       .filter(chunk => chunk.imageUrl)
       .map(chunk => ({
@@ -101,42 +123,55 @@ const streamChatResponse = async (req, res) => {
 
     console.log(`🖼️ Images found: ${images.length}`);
 
-    // Build context
+    // 🆕 Build enhanced context
     let contextText = '';
+
+    // PDF context
     if (relevantChunks.length > 0) {
-      contextText =
-        '\n\n📚 Relevant Information:\n\n' +
-        relevantChunks.map((chunk, i) =>
-          `[${i + 1}] From "${chunk.documentName}" (Page ${chunk.pageNumber}):\n${chunk.text}`
-        ).join('\n\n');
+      contextText += '\n\n📄 INFORMATION FROM YOUR UPLOADED DOCUMENTS:\n\n';
+      contextText += relevantChunks.map((chunk, i) =>
+        `[${i + 1}] From "${chunk.documentName}" (Page ${chunk.pageNumber}):\n${chunk.text}`
+      ).join('\n\n');
     }
 
+    // Web context
+    if (webResults.length > 0) {
+      contextText += '\n\n🌐 ADDITIONAL INFORMATION FROM SAP COMMUNITY:\n\n';
+      webResults.forEach((result, idx) => {
+        contextText += `[Web ${idx + 1}] ${result.title}\n`;
+        contextText += `${result.snippet}\n`;
+        contextText += `Source: ${result.url}\n\n`;
+      });
+    }
+
+    // Get conversation history
     const previousMessages = await prisma.message.findMany({
       where: { conversationId: conversation.id },
       orderBy: { createdAt: 'asc' },
       take: 10
     });
 
-    const messages = [
-  {
-    role: 'system',
-    content: `You are an expert SAP assistant with access to technical documentation and screenshots.
+    // 🆕 Enhanced system prompt
+    const systemPrompt = `You are PRISM, an expert SAP assistant${webResults.length > 0 ? ' with access to SAP community knowledge' : ''}.
 
 RESPONSE STYLE:
-- Provide detailed, step-by-step explanations in your own words
-- Include brief citations for credibility (e.g., "according to page 14..." or "as outlined in the Operations Guide...")
-- When screenshots are available, reference them naturally within the relevant step
-- Balance technical accuracy with clear, practical guidance
+- Provide detailed, step-by-step explanations
+- Include brief citations (e.g., "according to page 14..." or "based on SAP Community...")
+- Reference screenshots naturally when available
+- Balance technical accuracy with clarity
 
-FORMAT FOR STEP-BY-STEP INSTRUCTIONS:
-1. **Step Name**: Detailed explanation of what to do and why. [Reference: Page X, screenshot available]
-2. **Next Step**: Clear instructions with context. [Reference: Page Y]
+${webResults.length > 0 ? '- Clearly distinguish between user documents vs. external sources\n- Prioritize official SAP documentation\n' : ''}
+FORMAT:
+1. **Step Name**: Explanation [Reference: Source]
+2. **Next Step**: Instructions [Reference: Source]
 
-Example:
-1. **Configure User Management**: SAP S/4HANA uses the ABAP Platform's authentication system. Navigate to the security settings and configure role-based access control according to your organization's needs. [Reference: Page 13, Administration Guide. See screenshot below for the interface.]
+Integrate citations naturally.`;
 
-Always integrate citations naturally without disrupting the flow of explanation.`
-  },
+    const messages = [
+      {
+        role: 'system',
+        content: systemPrompt
+      },
       ...previousMessages.slice(0, -1).map(msg => ({
         role: msg.role,
         content: msg.content
@@ -173,21 +208,25 @@ Always integrate citations naturally without disrupting the flow of explanation.
 
     console.log('✅ Streaming complete');
 
+    // Save assistant message with metadata
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
         role: 'assistant',
         content: fullResponse,
-        images: images.length > 0
-          ? JSON.stringify(images)
-          : null
+        images: images.length > 0 ? JSON.stringify(images) : null,
+        metadata: webResults.length > 0 ? {
+          webSearchUsed: true,
+          webResultsCount: webResults.length
+        } : null
       }
     });
 
     res.write(`data: ${JSON.stringify({
       type: 'done',
       conversationId: conversation.id,
-      images
+      images,
+      webSearchUsed: webResults.length > 0
     })}\n\n`);
 
     res.end();
