@@ -1,42 +1,46 @@
-// backend/src/routes/chat.routes.js
-'use strict';
-
 const express = require('express');
 const router = express.Router();
 
-console.log('  → Loading chat controller...');
+// Import middleware
+const authModule = require('../middleware/auth.middleware');
+const authFlexibleModule = require('../middleware/auth-flexible.middleware');
+
+// Import controllers
 const chatController = require('../controllers/chat.controller');
+const chatStreamModule = require('../controllers/chat-stream.controller');
 
-console.log('  → Loading auth middleware...');
-const { authenticate } = require('../middleware/auth.middleware');
+// Extract functions
+const authMiddleware = authModule.authenticate;
+const authFlexible = authFlexibleModule.authFlexible || authFlexibleModule;
+const streamChatResponse = chatStreamModule.streamChatResponse;
 
-console.log('  → Setting up chat routes...');
+// Extract chat controller functions (CORRECT NAMES)
+const sendMessage = chatController.sendMessage;
+const getConversation = chatController.getConversation;
+const getUserConversations = chatController.getUserConversations; // ✅ FIXED: was getAllConversations
+const deleteConversation = chatController.deleteConversation;
 
-// Create conversation
-router.post('/conversations', authenticate, (req, res) => {
-  chatController.createConversation(req, res);
-});
+// Verify all functions exist
+if (typeof authMiddleware !== 'function') throw new Error('authMiddleware not a function');
+if (typeof authFlexible !== 'function') throw new Error('authFlexible not a function');
+if (typeof streamChatResponse !== 'function') throw new Error('streamChatResponse not a function');
+if (typeof sendMessage !== 'function') throw new Error('sendMessage not a function');
+if (typeof getConversation !== 'function') throw new Error('getConversation not a function');
+if (typeof getUserConversations !== 'function') throw new Error('getUserConversations not a function');
+if (typeof deleteConversation !== 'function') throw new Error('deleteConversation not a function');
 
-// Get all conversations
-router.get('/conversations', authenticate, (req, res) => {
-  chatController.getUserConversations(req, res);
-});
+console.log('✅ All functions validated');
 
-// Get conversation by ID
-router.get('/conversations/:id', authenticate, (req, res) => {
-  chatController.getConversation(req, res);
-});
+// SSE streaming route
+router.get('/conversations/:id/stream', authFlexible, streamChatResponse);
 
-// Delete conversation
-router.delete('/conversations/:id', authenticate, (req, res) => {
-  chatController.deleteConversation(req, res);
-});
+// Apply auth to remaining routes
+router.use(authMiddleware);
 
-// Send message
-router.post('/conversations/:id/messages', authenticate, (req, res) => {
-  chatController.sendMessage(req, res);
-});
-
-console.log('  → Chat routes configured');
+// Regular chat routes
+router.post('/conversations/:id/messages', sendMessage);
+router.get('/conversations/:id', getConversation);
+router.get('/conversations', getUserConversations); // ✅ FIXED
+router.delete('/conversations/:id', deleteConversation);
 
 module.exports = router;
