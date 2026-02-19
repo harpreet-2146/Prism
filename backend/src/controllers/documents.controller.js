@@ -10,43 +10,50 @@ class DocumentsController {
    * POST /api/documents/upload
    */
   async upload(req, res) {
-    try {
-      if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          error: 'No file uploaded'
-        });
-      }
+  try {
+    const userId = req.user.userId; // ✅ Correct
+    
+    console.log('📤 Upload request:', {
+      userId,
+      file: req.file?.originalname,
+      size: req.file?.size
+    });
 
-      const userId = req.user.id;
-      const document = await documentsService.uploadDocument(req.file, userId);
-
-      res.status(201).json({
-        success: true,
-        data: document
-      });
-
-    } catch (error) {
-      logger.error('Document upload failed', {
-        userId: req.user?.id,
-        error: error.message,
-        component: 'documents-controller'
-      });
-
-      res.status(500).json({
+    if (!req.file) {
+      return res.status(400).json({
         success: false,
-        error: error.message
+        error: 'No file uploaded'
       });
     }
-  }
 
+    // ✅ Correct: uploadDocument(file, userId)
+    const document = await documentsService.uploadDocument(
+      req.file,  // ✅ file first
+      userId     // ✅ userId second
+    );
+
+    res.status(201).json({
+      success: true,
+      data: document
+    });
+  } catch (error) {
+    logger.error('Upload failed', {
+      error: error.message,
+      component: 'documents-controller'
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
   /**
    * Get all user documents
    * GET /api/documents
    */
   async getUserDocuments(req, res) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const documents = await documentsService.getUserDocuments(userId);
 
       res.json({
@@ -74,7 +81,7 @@ class DocumentsController {
    */
   async getDocumentById(req, res) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const documentId = req.params.id;
 
       const document = await documentsService.getDocumentById(documentId, userId);
@@ -107,7 +114,7 @@ class DocumentsController {
    */
   async deleteDocument(req, res) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const documentId = req.params.id;
 
       const result = await documentsService.deleteDocument(documentId, userId);
@@ -141,7 +148,7 @@ class DocumentsController {
    * Streams real-time processing progress to client
    */
   async getDocumentStatus(req, res) {
-    const userId = req.user.id;
+    const userId = req.user.userId;
     const documentId = req.params.id;
 
     try {
@@ -304,7 +311,7 @@ class DocumentsController {
   async serveImage(req, res) {
     try {
       const { documentId, filename } = req.params;
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
       // Verify user owns this document
       const document = await documentsService.getDocumentById(documentId, userId);
