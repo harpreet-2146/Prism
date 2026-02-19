@@ -12,11 +12,6 @@ const { PrismaClient } = require('@prisma/client');
 const config = require('./config');
 const { logger } = require('./utils/logger');
 
-const authRoutes = require('./routes/auth.routes');
-const documentsRoutes = require('./routes/documents.routes');
-const chatRoutes = require('./routes/chat.routes');
-const exportRoutes = require('./routes/export.routes');
-
 // ================================================================
 // INITIALIZE
 // ================================================================
@@ -24,9 +19,13 @@ const exportRoutes = require('./routes/export.routes');
 const app = express();
 const prisma = new PrismaClient();
 
+console.log('\n🔧 Initializing PRISM Backend...\n');
+
 // ================================================================
 // MIDDLEWARE
 // ================================================================
+
+console.log('→ Setting up middleware...');
 
 // Security headers
 app.use(helmet({
@@ -53,9 +52,13 @@ if (config.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
 
+console.log('✅ Middleware configured\n');
+
 // ================================================================
 // HEALTH CHECK
 // ================================================================
+
+console.log('→ Setting up health check...');
 
 app.get('/health', (req, res) => {
   res.json({
@@ -67,14 +70,79 @@ app.get('/health', (req, res) => {
   });
 });
 
+console.log('✅ Health check configured\n');
+
 // ================================================================
-// API ROUTES
+// STATIC FILE SERVING
 // ================================================================
 
-app.use('/api/auth', authRoutes);
-app.use('/api/documents', documentsRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/export', exportRoutes);
+const path = require('path');
+
+// Serve uploaded files (images from documents)
+const uploadsPath = path.join(__dirname, '../uploads');
+app.use('/uploads', express.static(uploadsPath));
+console.log('✅ Static uploads folder:', uploadsPath);
+
+// ================================================================
+// API ROUTES - WITH ERROR HANDLING
+// ================================================================
+
+console.log('→ Loading routes...\n');
+
+// AUTH ROUTES
+try {
+  console.log('  1️⃣ Loading auth routes...');
+  const authRoutes = require('./routes/auth.routes');
+  app.use('/api/auth', authRoutes);
+  console.log('  ✅ Auth routes mounted at /api/auth\n');
+} catch (error) {
+  console.error('  ❌ FATAL: Auth routes failed to load!');
+  console.error('  Error:', error.message);
+  console.error('  Stack:', error.stack);
+  process.exit(1);
+}
+
+// DOCUMENTS ROUTES
+try {
+  console.log('  2️⃣ Loading documents routes...');
+  const documentsRoutes = require('./routes/documents.routes');
+  app.use('/api/documents', documentsRoutes);
+  console.log('  ✅ Documents routes mounted at /api/documents\n');
+} catch (error) {
+  console.error('  ❌ FATAL: Documents routes failed to load!');
+  console.error('  Error:', error.message);
+  console.error('  Stack:', error.stack);
+  process.exit(1);
+}
+
+// CHAT ROUTES
+try {
+  console.log('  3️⃣ Loading chat routes...');
+  const chatRoutes = require('./routes/chat.routes');
+  console.log('  📦 Chat routes loaded, attempting to mount...');
+  app.use('/api/chat', chatRoutes);
+  console.log('  ✅ Chat routes mounted at /api/chat\n');
+} catch (error) {
+  console.error('  ❌ FATAL: Chat routes failed to load!');
+  console.error('  Error:', error.message);
+  console.error('  Stack:', error.stack);
+  process.exit(1);
+}
+
+// EXPORT ROUTES
+try {
+  console.log('  4️⃣ Loading export routes...');
+  const exportRoutes = require('./routes/export.routes');
+  app.use('/api/export', exportRoutes);
+  console.log('  ✅ Export routes mounted at /api/export\n');
+} catch (error) {
+  console.error('  ❌ FATAL: Export routes failed to load!');
+  console.error('  Error:', error.message);
+  console.error('  Stack:', error.stack);
+  process.exit(1);
+}
+
+console.log('✅ All routes loaded successfully!\n');
 
 // ================================================================
 // 404 HANDLER
@@ -111,6 +179,8 @@ app.use((err, req, res, next) => {
 // ================================================================
 
 const PORT = config.PORT || 5000;
+
+console.log('→ Starting server...\n');
 
 app.listen(PORT, async () => {
   console.log('\n' + '='.repeat(60));
@@ -157,4 +227,22 @@ process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down gracefully');
   await prisma.$disconnect();
   process.exit(0);
+});
+
+// ================================================================
+// UNCAUGHT EXCEPTIONS
+// ================================================================
+
+process.on('uncaughtException', (error) => {
+  console.error('\n❌ UNCAUGHT EXCEPTION!');
+  console.error('Error:', error.message);
+  console.error('Stack:', error.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('\n❌ UNHANDLED PROMISE REJECTION!');
+  console.error('Reason:', reason);
+  console.error('Promise:', promise);
+  process.exit(1);
 });
