@@ -6,20 +6,13 @@ const fs = require('fs').promises;
 const { PrismaClient } = require('@prisma/client');
 const config = require('../config');
 const { logger } = require('../utils/logger');
-const pdfProcessor = require('./pdf/pdf-processor.service');
-const imageExtractor = require('./pdf/image-extractor.service');
-const ocrService = require('./ocr.service');
+
+const pythonClient = require('./python-client.service');
 const embeddingSearch = require('./vector/embedding-search.service');
 
 const prisma = new PrismaClient();
 
 class DocumentsService {
-  /**
-   * Upload and process a PDF document
-   * @param {Object} file - Multer file object
-   * @param {string} userId - User ID from JWT
-   * @returns {Promise<Object>} Created document
-   */
   async uploadDocument(file, userId) {
     let document = null;
 
@@ -31,7 +24,13 @@ class DocumentsService {
         component: 'documents-service'
       });
 
-      // Create document record
+      try {
+        await pythonClient.healthCheck();
+        logger.info('Python service is healthy', { component: 'documents-service' });
+      } catch (error) {
+        throw new Error('Python processing service is unavailable. Please try again later.');
+      }
+
       document = await prisma.document.create({
         data: {
           userId,
@@ -51,7 +50,6 @@ class DocumentsService {
         component: 'documents-service'
       });
 
-      // Start async processing (don't await)
       this._processDocument(document.id, userId, file.path).catch(error => {
         logger.error('Document processing failed', {
           documentId: document.id,
@@ -64,7 +62,6 @@ class DocumentsService {
       return document;
 
     } catch (error) {
-      // Cleanup if document creation failed
       if (file.path) {
         await fs.unlink(file.path).catch(() => {});
       }
@@ -80,230 +77,228 @@ class DocumentsService {
     }
   }
 
-  /**
-   * Background processing pipeline (REVISED WITH OCR)
-   * @private
-   */
   async _processDocument(documentId, userId, filePath) {
     try {
-      logger.info('Starting document processing pipeline', {
+      logger.info('Starting document processing pipeline (PYTHON)', {
         documentId,
         userId,
         component: 'documents-service'
       });
 
-      // Mark as processing
       await prisma.document.update({
         where: { id: documentId },
         data: { status: 'processing' }
       });
 
-      // ============================================================
-      // STEP 1: Extract PDF text (EXISTING - KEEP)
-      // ============================================================
-      logger.info('Step 1: Extracting PDF text', {
+      const absolutePath = path.isAbsolute(filePath) 
+        ? filePath 
+        : path.resolve(process.cwd(), filePath);
+      const normalizedPath = absolutePath.replace(/\\/g, '/');
+
+      // STEP 1: Extract PDF text
+      logger.info('Step 1: Extracting PDF text via Python', {
         documentId,
         component: 'documents-service'
       });
 
-      const { textContent, pageCount, sapMetadata, textChunks } = 
-        await pdfProcessor.processText(filePath, documentId);
+      const pdfResult = await pythonClient.processPDF(documentId, normalizedPath);
 
-      // Update document with PDF text and metadata
       await prisma.document.update({
         where: { id: documentId },
         data: {
-          textContent,
-          pageCount,
-          sapModule: sapMetadata.sapModule,
-          tcodes: sapMetadata.tcodes,
-          errorCodes: sapMetadata.errorCodes,
-          noteNumber: sapMetadata.noteNumber
+          textContent: pdfResult.text_content || '',
+          pageCount: pdfResult.page_count || 0,
+          sapModule: pdfResult.metadata?.sap_module || null,
+          tcodes: pdfResult.metadata?.tcodes || [],
+          errorCodes: pdfResult.metadata?.error_codes || [],
+          noteNumber: pdfResult.metadata?.note_number || null
         }
       });
 
-      logger.info('PDF text extracted', {
+      logger.info('PDF text extracted (Python)', {
         documentId,
-        pageCount,
-        textLength: textContent.length,
-        pdfTextChunks: textChunks.length,
+        pageCount: pdfResult.page_count,
+        textLength: pdfResult.text_content?.length || 0,
         component: 'documents-service'
       });
 
-      // ============================================================
-      // STEP 2: Extract images from PDF (EXISTING - KEEP)
-      // ============================================================
-      logger.info('Step 2: Extracting images', {
+      // STEP 2: Extract images
+      logger.info('Step 2: Extracting images via Python', {
         documentId,
         component: 'documents-service'
       });
 
-      const extractedImages = await imageExtractor.extractImages(filePath, documentId);
+      const extractedImages = await pythonClient.extractImages(documentId, normalizedPath);
 
-      // Create image records (status: pending for OCR)
-      const imageRecords = await Promise.all(
-        extractedImages.map(img =>
-          prisma.documentImage.create({
-            data: {
-              documentId,
-              pageNumber: img.pageNumber,
-              imageIndex: img.imageIndex,
-              storagePath: img.storagePath,
-              width: img.width,
-              height: img.height,
-              format: img.format,
-              fileSize: img.fileSize,
-              ocrStatus: 'pending'
-            }
-          })
-        )
-      );
-
-      await prisma.document.update({
-        where: { id: documentId },
-        data: { imageCount: imageRecords.length }
-      });
-
-      logger.info('Images extracted', {
-        documentId,
-        imageCount: imageRecords.length,
+      logger.info('Python extraction response:', {
+        count: extractedImages.length,
+        rawResponse: JSON.stringify(extractedImages[0]),
         component: 'documents-service'
       });
 
-      // ============================================================
-      // STEP 3: Run OCR on all images (NEW)
-      // ============================================================
-      logger.info('Step 3: Running OCR on images', {
-        documentId,
-        imageCount: imageRecords.length,
+      // Query the images Python stored in its database
+      const pythonImages = await prisma.documentImage.findMany({
+        where: { documentId },
+        orderBy: [
+          { pageNumber: 'asc' },
+          { imageIndex: 'asc' }
+        ]
+      });
+
+      logger.info('Images found in database:', {
+        count: pythonImages.length,
+        sample: pythonImages[0],
         component: 'documents-service'
       });
 
-      const imagesToProcess = imageRecords.map(img => ({
-        id: img.id,
-        path: img.storagePath
-      }));
-
-      let ocrResults = [];
-      if (imagesToProcess.length > 0) {
-        ocrResults = await ocrService.processImages(
-          imagesToProcess,
-          (progress) => {
-            logger.info('OCR progress', {
-              documentId,
-              ...progress,
-              component: 'documents-service'
-            });
-          }
-        );
-      }
-
-      // Update images with OCR results
-      for (const result of ocrResults) {
-        await prisma.documentImage.update({
-          where: { id: result.id },
-          data: {
-            ocrText: result.text,
-            ocrConfidence: result.confidence,
-            ocrStatus: result.text.length > 0 ? 'completed' : 'failed'
-          }
+      if (pythonImages.length === 0) {
+        logger.warn('No images found! Python might have failed silently', {
+          documentId,
+          component: 'documents-service'
         });
       }
 
-      const successfulOCR = ocrResults.filter(r => r.text.length > 0).length;
-
-      logger.info('OCR processing complete', {
+      // STEP 3: OCR on images
+      logger.info('Step 3: Starting OCR via Python', {
         documentId,
-        totalImages: imageRecords.length,
-        successfulOCR,
-        failedOCR: imageRecords.length - successfulOCR,
+        imageCount: pythonImages.length,
         component: 'documents-service'
       });
 
-      // ============================================================
-      // STEP 4: Create embeddings from BOTH sources (REVISED)
-      // ============================================================
+      const ocrEmbeddings = [];
+      for (let i = 0; i < pythonImages.length; i++) {
+        const img = pythonImages[i];
+        
+        try {
+          logger.info('OCR progress', {
+            documentId,
+            current: i + 1,
+            total: pythonImages.length,
+            percent: Math.round(((i + 1) / pythonImages.length) * 100),
+            component: 'documents-service'
+          });
+
+          const absoluteImagePath = path.isAbsolute(img.storagePath)
+            ? img.storagePath
+            : path.resolve(process.cwd(), img.storagePath);
+          const normalizedImagePath = absoluteImagePath.replace(/\\/g, '/');
+
+          const ocrResult = await pythonClient.performOCR(
+            normalizedImagePath,
+            documentId,
+            img.pageNumber,
+            img.imageIndex
+          );
+
+          if (ocrResult.text && ocrResult.text.trim().length > 0) {
+            ocrEmbeddings.push({
+              documentId,
+              userId,
+              text: ocrResult.text,
+              pageNumber: img.pageNumber,
+              chunkIndex: ocrEmbeddings.length,
+              sourceType: 'ocr',
+              sourceImageId: img.id,
+              embedding: []
+            });
+
+            await prisma.documentImage.update({
+              where: { id: img.id },
+              data: {
+                ocrText: ocrResult.text,
+                ocrConfidence: ocrResult.confidence || 0,
+                ocrStatus: 'completed'
+              }
+            });
+          }
+
+        } catch (error) {
+          logger.error('OCR failed for image (Python)', {
+            documentId,
+            imageId: img.id,
+            error: error.message,
+            component: 'documents-service'
+          });
+
+          await prisma.documentImage.update({
+            where: { id: img.id },
+            data: { ocrStatus: 'failed' }
+          });
+        }
+      }
+
+      logger.info('OCR completed (Python)', {
+        documentId,
+        ocrEmbeddings: ocrEmbeddings.length,
+        component: 'documents-service'
+      });
+
+      // STEP 4: Create embeddings
       logger.info('Step 4: Creating embeddings', {
         documentId,
         component: 'documents-service'
       });
 
-      await prisma.document.update({
-        where: { id: documentId },
-        data: { embeddingStatus: 'processing' }
-      });
+      const allEmbeddings = [
+        ...(pdfResult.chunks || []).map((chunk, idx) => ({
+          documentId,
+          userId,
+          text: chunk.content,
+          pageNumber: chunk.page_number,
+          chunkIndex: idx,
+          sourceType: 'pdf_text',
+          sourceImageId: null,
+          embedding: []
+        })),
+        ...ocrEmbeddings
+      ];
 
-      // Prepare chunks from PDF text
-      const pdfTextEmbeddings = textChunks.map(chunk => ({
-        text: chunk.text,
-        chunkIndex: chunk.chunkIndex,
-        pageNumber: chunk.pageNumber,
-        sourceType: 'pdf_text',
-        sourceImageId: null
-      }));
+      if (allEmbeddings.length > 0) {
+        logger.info('Generating embeddings via Python', {
+          documentId,
+          count: allEmbeddings.length,
+          component: 'documents-service'
+        });
 
-      // Prepare chunks from image OCR
-      const ocrEmbeddings = [];
-      for (const result of ocrResults) {
-        if (result.text.length > 50) {
-          // Find the image record to get page number
-          const imageRecord = imageRecords.find(img => img.id === result.id);
-          
-          // Chunk the OCR text
-          const chunks = this._chunkText(result.text, 500);
-          
-          chunks.forEach((chunkText, idx) => {
-            ocrEmbeddings.push({
-              text: chunkText,
-              chunkIndex: idx,
-              pageNumber: imageRecord.pageNumber,
-              sourceType: 'image_ocr',
-              sourceImageId: result.id
-            });
-          });
-        }
+        const texts = allEmbeddings.map(e => e.text);
+        const embeddings = await pythonClient.generateEmbeddings(texts);
+
+        await Promise.all(
+          allEmbeddings.map((emb, index) =>
+            prisma.embedding.create({
+              data: {
+                ...emb,
+                embedding: embeddings[index]
+              }
+            })
+          )
+        );
+
+        logger.info('Embeddings generated (Python)', {
+          documentId,
+          count: embeddings.length,
+          component: 'documents-service'
+        });
       }
 
-      // Combine both sources
-      const allChunks = [...pdfTextEmbeddings, ...ocrEmbeddings];
-
-      logger.info('Embedding chunks prepared', {
-        documentId,
-        pdfTextChunks: pdfTextEmbeddings.length,
-        ocrChunks: ocrEmbeddings.length,
-        totalChunks: allChunks.length,
-        component: 'documents-service'
-      });
-
-      // Create embeddings for all chunks
-      if (allChunks.length > 0) {
-        await embeddingSearch.indexDocumentChunks(userId, documentId, allChunks);
-      }
-
-      await prisma.document.update({
-        where: { id: documentId },
-        data: { embeddingStatus: 'completed' }
-      });
-
-      // ============================================================
       // STEP 5: Mark as completed
-      // ============================================================
       await prisma.document.update({
         where: { id: documentId },
-        data: { status: 'completed' }
+        data: {
+          status: 'completed',
+          embeddingStatus: 'completed',
+          updatedAt: new Date()
+        }
       });
 
-      logger.info('Document processing complete', {
+      logger.info('Document processing completed (Python)', {
         documentId,
-        pageCount,
-        imageCount: imageRecords.length,
-        successfulOCR,
-        totalEmbeddings: allChunks.length,
+        totalEmbeddings: allEmbeddings.length,
         component: 'documents-service'
       });
 
     } catch (error) {
-      logger.error('Document processing failed', {
+      logger.error('Document processing failed (Python)', {
         documentId,
         error: error.message,
         stack: error.stack,
@@ -314,199 +309,115 @@ class DocumentsService {
         where: { id: documentId },
         data: {
           status: 'failed',
-          processingError: error.message,
-          embeddingStatus: 'failed'
+          processingError: error.message
         }
-      });
+      }).catch(() => {});
+
+      throw error;
     }
   }
 
-  /**
-   * Chunk text into smaller pieces for embeddings
-   * @private
-   */
-  _chunkText(text, maxChunkSize = 500) {
-    if (!text || text.trim().length === 0) return [];
-
-    const overlap = 50;
-    const chunks = [];
-    const cleaned = text.replace(/\s+/g, ' ').trim();
-
-    let start = 0;
-    while (start < cleaned.length) {
-      const end = Math.min(start + maxChunkSize, cleaned.length);
-      const chunkText = cleaned.slice(start, end).trim();
-
-      if (chunkText.length > 20) {
-        chunks.push(chunkText);
+  async getDocumentById(documentId, userId) {
+    const document = await prisma.document.findFirst({
+      where: {
+        id: documentId,
+        userId
+      },
+      include: {
+        embeddings: {
+          orderBy: [
+            { pageNumber: 'asc' },
+            { chunkIndex: 'asc' }
+          ]
+        },
+        images: {
+          orderBy: [
+            { pageNumber: 'asc' },
+            { imageIndex: 'asc' }
+          ]
+        }
       }
+    });
 
-      start += maxChunkSize - overlap;
+    if (!document) {
+      throw new Error('Document not found');
     }
 
-    return chunks;
+    return document;
   }
 
-  /**
-   * Get all documents for a user
-   */
-  async getUserDocuments(userId) {
-    try {
-      const documents = await prisma.document.findMany({
+  async getDocument(documentId, userId) {
+    return this.getDocumentById(documentId, userId);
+  }
+
+  async getUserDocuments(userId, page = 1, pageSize = 10) {
+    const skip = (page - 1) * pageSize;
+
+    const [documents, total] = await Promise.all([
+      prisma.document.findMany({
         where: { userId },
         orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize,
         include: {
           _count: {
             select: {
-              images: true,
-              embeddings: true
+              embeddings: true,
+              images: true
             }
           }
         }
-      });
+      }),
+      prisma.document.count({ where: { userId } })
+    ]);
 
-      return documents;
-    } catch (error) {
-      logger.error('Failed to fetch user documents', {
-        userId,
-        error: error.message,
-        component: 'documents-service'
-      });
-      throw error;
-    }
+    return {
+      documents,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize)
+    };
   }
 
-  /**
-   * Get document by ID (user must own it)
-   */
-  async getDocumentById(documentId, userId) {
-    try {
-      const document = await prisma.document.findFirst({
-        where: {
-          id: documentId,
-          userId
-        },
-        include: {
-          images: {
-            orderBy: { pageNumber: 'asc' }
-          },
-          _count: {
-            select: { embeddings: true }
-          }
-        }
-      });
-
-      if (!document) {
-        throw new Error('Document not found');
-      }
-
-      // Add image URLs
-      document.images = document.images.map(img => ({
-        ...img,
-        url: imageExtractor.getImageUrl(documentId, img.pageNumber)
-      }));
-
-      return document;
-    } catch (error) {
-      logger.error('Failed to fetch document', {
-        documentId,
-        userId,
-        error: error.message,
-        component: 'documents-service'
-      });
-      throw error;
-    }
+  async listDocuments(userId, page = 1, pageSize = 10) {
+    return this.getUserDocuments(userId, page, pageSize);
   }
 
-  /**
-   * Delete a document (user must own it)
-   */
+  async searchDocument(documentId, query, userId, limit = 5) {
+    const document = await prisma.document.findFirst({
+      where: { id: documentId, userId }
+    });
+
+    if (!document) {
+      throw new Error('Document not found');
+    }
+
+    return embeddingSearch.search(documentId, query, limit);
+  }
+
   async deleteDocument(documentId, userId) {
-    try {
-      const document = await prisma.document.findFirst({
-        where: { id: documentId, userId }
-      });
+    const document = await prisma.document.findFirst({
+      where: { id: documentId, userId }
+    });
 
-      if (!document) {
-        throw new Error('Document not found');
-      }
+    if (!document) {
+      throw new Error('Document not found');
+    }
 
-      // Delete files
+    if (document.storagePath) {
       await fs.unlink(document.storagePath).catch(() => {});
-      await imageExtractor.deleteDocumentImages(documentId);
-
-      // Delete from database (cascades to images, embeddings)
-      await prisma.document.delete({
-        where: { id: documentId }
-      });
-
-      logger.info('Document deleted', {
-        documentId,
-        userId,
-        component: 'documents-service'
-      });
-
-      return { success: true };
-    } catch (error) {
-      logger.error('Failed to delete document', {
-        documentId,
-        userId,
-        error: error.message,
-        component: 'documents-service'
-      });
-      throw error;
     }
-  }
 
-  /**
-   * Get document processing status
-   */
-  async getDocumentStatus(documentId, userId) {
-    try {
-      const document = await prisma.document.findFirst({
-        where: { id: documentId, userId },
-        select: {
-          id: true,
-          status: true,
-          embeddingStatus: true,
-          processingError: true,
-          pageCount: true,
-          imageCount: true,
-          _count: {
-            select: {
-              images: true,
-              embeddings: true
-            }
-          }
-        }
-      });
+    await prisma.document.delete({
+      where: { id: documentId }
+    });
 
-      if (!document) {
-        throw new Error('Document not found');
-      }
-
-      // Count OCR completed images
-      const ocrCompleted = await prisma.documentImage.count({
-        where: {
-          documentId,
-          ocrStatus: 'completed'
-        }
-      });
-
-      return {
-        ...document,
-        ocrCompleted,
-        ocrTotal: document._count.images
-      };
-    } catch (error) {
-      logger.error('Failed to get document status', {
-        documentId,
-        userId,
-        error: error.message,
-        component: 'documents-service'
-      });
-      throw error;
-    }
+    logger.info('Document deleted', {
+      documentId,
+      userId,
+      component: 'documents-service'
+    });
   }
 }
 

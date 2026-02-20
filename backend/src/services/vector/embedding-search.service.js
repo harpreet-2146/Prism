@@ -1,16 +1,20 @@
 'use strict';
 
-const { HfInference } = require('@huggingface/inference');
 const { PrismaClient } = require('@prisma/client');
 const config = require('../../config');
 const { logger } = require('../../utils/logger');
+const pythonClient = require('../python-client.service');
 
 const prisma = new PrismaClient();
 
 class EmbeddingSearchService {
   constructor() {
-    this.hf = config.HF_TOKEN ? new HfInference(config.HF_TOKEN) : null;
-    this.model = config.HF_EMBEDDING_MODEL;
+    // Use Python embedding service instead of HuggingFace
+    this.usePython = true;
+    this.model = config.HF_EMBEDDING_MODEL || 'sentence-transformers/all-MiniLM-L6-v2';
+    logger.info('EmbeddingSearchService initialized with Python backend', {
+      component: 'embedding-search'
+    });
   }
 
   /* ================================================================
@@ -18,14 +22,6 @@ class EmbeddingSearchService {
   ================================================================= */
 
   async indexDocumentChunks(userId, documentId, chunks) {
-    if (!this.hf) {
-      logger.warn('HF token not configured, skipping embedding creation', {
-        documentId,
-        component: 'embedding-search'
-      });
-      return;
-    }
-
     try {
       logger.info('Creating embeddings for document chunks', {
         userId,
@@ -102,13 +98,6 @@ class EmbeddingSearchService {
   ================================================================= */
 
   async search(userId, query, topK = 5) {
-    if (!this.hf) {
-      logger.warn('HF token not configured, search unavailable', {
-        component: 'embedding-search'
-      });
-      return [];
-    }
-
     try {
       logger.info('Searching embeddings', {
         userId,
@@ -117,14 +106,15 @@ class EmbeddingSearchService {
         component: 'embedding-search'
       });
 
+      // Generate query embedding using Python
       const queryEmbedding = await this._createEmbedding(query);
 
-      // ✅ FIX: Include sourceImage relation to get actual file paths
+      // Get all user embeddings
       const userEmbeddings = await prisma.embedding.findMany({
         where: { userId },
         include: {
           document: true,
-          sourceImage: true // ✅ FIXED: Changed from "image" to "sourceImage"
+          sourceImage: true
         }
       });
 
@@ -136,14 +126,14 @@ class EmbeddingSearchService {
         return [];
       }
 
+      // Calculate similarity scores
       const scored = userEmbeddings.map(e => {
         const score = this._cosineSimilarity(queryEmbedding, e.embedding);
 
-        // ✅ FIX: Build correct image URL from storagePath
+        // Build image URL if available
         let imageUrl = null;
-        if (e.sourceImage?.storagePath) { // ✅ FIXED: Changed from "e.image" to "e.sourceImage"
-          // Convert Windows backslashes to forward slashes
-          const path = e.sourceImage.storagePath.replace(/\\/g, '/'); // ✅ FIXED: Changed from "e.image" to "e.sourceImage"
+        if (e.sourceImage?.storagePath) {
+          const path = e.sourceImage.storagePath.replace(/\\/g, '/');
           imageUrl = `${config.BASE_URL}/${path}`;
         }
 
@@ -152,16 +142,16 @@ class EmbeddingSearchService {
           text: e.text,
           pageNumber: e.pageNumber,
           documentId: e.documentId,
-          documentName: e.document?.name || 'Unknown Document',
+          documentName: e.document?.originalName || 'Unknown Document',
           sourceType: e.sourceType,
           sourceImageId: e.sourceImageId,
-          imageUrl, // ✅ Now has correct URL
+          imageUrl,
           score
         };
       });
 
+      // Sort by score and return top K
       scored.sort((a, b) => b.score - a.score);
-
       const topResults = scored.slice(0, topK);
 
       logger.info('Search complete', {
@@ -235,14 +225,11 @@ class EmbeddingSearchService {
 
   async _createEmbedding(text) {
     try {
-      const response = await this.hf.featureExtraction({
-        model: this.model,
-        inputs: text
-      });
-
-      return Array.isArray(response[0])
-        ? response[0]
-        : response;
+      // Call Python embedding service
+      const embeddings = await pythonClient.generateEmbeddings([text]);
+      
+      // Return first embedding (since we only sent one text)
+      return embeddings[0];
 
     } catch (error) {
       logger.error('Embedding creation failed', {
@@ -282,9 +269,10 @@ class EmbeddingSearchService {
 
   healthCheck() {
     return {
-      configured: Boolean(this.hf),
+      configured: true,
+      backend: 'Python',
       model: this.model,
-      status: this.hf ? 'ready' : 'not_configured'
+      status: 'ready'
     };
   }
 }
