@@ -9,7 +9,6 @@ export const useDocuments = () => {
   const [error, setError] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   
-  // Track active polling intervals
   const pollingIntervalsRef = useRef({});
 
   // Fetch all documents
@@ -19,10 +18,16 @@ export const useDocuments = () => {
 
     try {
       const response = await documentsAPI.getAll();
-      setDocuments(response.data.data || []);
+      
+      // ✅ FIX: Backend returns { data: { documents: [...], total, page } }
+      const documentsData = response.data.data?.documents || response.data.data || [];
+      
+      console.log('📚 Fetched documents:', documentsData);
+      setDocuments(Array.isArray(documentsData) ? documentsData : []);
     } catch (err) {
       console.error('Failed to fetch documents:', err);
       setError(err.response?.data?.error || 'Failed to load documents');
+      setDocuments([]); // ✅ Set empty array on error
     } finally {
       setLoading(false);
     }
@@ -30,7 +35,6 @@ export const useDocuments = () => {
 
   // Poll for document status updates
   const pollDocumentStatus = useCallback((documentId) => {
-    // Clear existing interval if any
     if (pollingIntervalsRef.current[documentId]) {
       clearInterval(pollingIntervalsRef.current[documentId]);
     }
@@ -40,33 +44,24 @@ export const useDocuments = () => {
         const response = await documentsAPI.getById(documentId);
         const updatedDoc = response.data.data;
 
-        // Update document in state
         setDocuments(prev =>
           prev.map(doc => doc.id === documentId ? updatedDoc : doc)
         );
 
-        // Stop polling when completed or failed
         if (updatedDoc.status === 'completed' || updatedDoc.status === 'failed') {
           clearInterval(interval);
           delete pollingIntervalsRef.current[documentId];
-          
           console.log('✅ Stopped polling for document:', documentId);
         }
       } catch (err) {
         console.error('Failed to poll document status:', err);
         
-        // ✅ FIX: Stop polling if document not found (404)
         if (err.response?.status === 404) {
           console.warn('⚠️  Document not found, stopping poll:', documentId);
-          
-          // Remove from state
           setDocuments(prev => prev.filter(doc => doc.id !== documentId));
-          
-          // Stop polling
           clearInterval(interval);
           delete pollingIntervalsRef.current[documentId];
         } else {
-          // For other errors, stop polling after 3 consecutive failures
           const failureKey = `${documentId}_failures`;
           pollingIntervalsRef.current[failureKey] = 
             (pollingIntervalsRef.current[failureKey] || 0) + 1;
@@ -79,11 +74,9 @@ export const useDocuments = () => {
           }
         }
       }
-    }, 3000); // Poll every 3 seconds
+    }, 3000);
 
-    // Store interval ID
     pollingIntervalsRef.current[documentId] = interval;
-
     return interval;
   }, []);
 
@@ -93,7 +86,6 @@ export const useDocuments = () => {
     setError(null);
 
     try {
-      // Upload file
       const uploadResponse = await documentsAPI.upload(file, (progressEvent) => {
         const percentCompleted = Math.round(
           (progressEvent.loaded * 100) / progressEvent.total
@@ -110,13 +102,12 @@ export const useDocuments = () => {
 
       const newDocument = uploadResponse.data.data;
 
-      // ✅ CRITICAL: Add document to state immediately
+      // ✅ Add document to state immediately
       setDocuments(prev => [newDocument, ...prev]);
 
       // ✅ Start polling for status updates
       pollDocumentStatus(newDocument.id);
 
-      // ✅ Notify upload complete
       if (onProgress) {
         onProgress({
           type: 'processing',
@@ -142,7 +133,6 @@ export const useDocuments = () => {
     setError(null);
 
     try {
-      // Stop polling if active
       if (pollingIntervalsRef.current[documentId]) {
         clearInterval(pollingIntervalsRef.current[documentId]);
         delete pollingIntervalsRef.current[documentId];
@@ -179,6 +169,11 @@ export const useDocuments = () => {
 
   // Check for processing documents and start polling
   useEffect(() => {
+    if (!Array.isArray(documents)) {
+      console.error('❌ Documents is not an array:', documents);
+      return;
+    }
+
     const processingDocs = documents.filter(
       doc => doc.status === 'pending' || doc.status === 'processing'
     );
@@ -198,7 +193,7 @@ export const useDocuments = () => {
   }, []);
 
   return {
-    documents,
+    documents: Array.isArray(documents) ? documents : [], // ✅ Safety check
     loading,
     error,
     isUploading,
