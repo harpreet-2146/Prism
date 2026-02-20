@@ -2,9 +2,9 @@
 Embedding Generation API Routes
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Union
 import logging
 
 from app.services.embedding_service import embedding_service
@@ -47,6 +47,63 @@ class SearchRequest(BaseModel):
 
 
 @router.post("/generate")
+async def generate_embeddings(request: Request):
+    """
+    Generate embeddings - accepts BOTH formats:
+    1. Array format (from backend): ["text1", "text2", ...]
+    2. Object format: {"texts": ["text1", "text2", ...]}
+    
+    Backend sends: POST /api/embeddings/generate with array of texts
+    """
+    try:
+        # Get raw body
+        body = await request.json()
+        
+        # Handle both formats
+        if isinstance(body, list):
+            # Direct array from backend
+            texts = body
+            logger.info(f"📝 Received array format: {len(texts)} texts")
+        elif isinstance(body, dict) and 'texts' in body:
+            # Object with texts field
+            texts = body['texts']
+            logger.info(f"📝 Received object format: {len(texts)} texts")
+        elif isinstance(body, dict) and 'text' in body:
+            # Single text
+            texts = [body['text']]
+            logger.info(f"📝 Received single text")
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid request format. Expected array or {{texts: []}}. Got: {type(body)}"
+            )
+        
+        # Validate
+        if not texts:
+            raise HTTPException(status_code=400, detail="No texts provided")
+        
+        if len(texts) > 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Batch too large: {len(texts)} texts (max 200)"
+            )
+        
+        # Generate embeddings
+        embeddings = embedding_service.generate_batch_embeddings(texts)
+        
+        logger.info(f"✅ Generated {len(embeddings)} embeddings")
+        
+        # Return as array (matches backend expectation)
+        return embeddings
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Embedding generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/generate-single")
 async def generate_single_embedding(request: GenerateEmbeddingRequest):
     """
     Generate embedding for a single text
