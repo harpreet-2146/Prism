@@ -21,23 +21,28 @@ class PDFProcessor:
     def __init__(self):
         self.max_pages = settings.PDF_MAX_PAGES
     
-    def extract_text(self, pdf_path: str) -> List[Dict]:
+    def extract_text(self, pdf_path: str) -> tuple[List[Dict], Dict[int, int]]:
         """
-        Extract text from all pages
+        Extract text from all pages and return word counts
         
         Args:
             pdf_path: Path to PDF file
             
         Returns:
-            List of page data with text content
+            Tuple of (pages_data, word_counts_dict)
+            - pages_data: List of page data with text content
+            - word_counts_dict: Dict mapping page_num -> word_count
         """
         try:
             doc = fitz.open(pdf_path)
             
             if len(doc) > self.max_pages:
-                raise ValueError(f"PDF has {len(doc)} pages, maximum is {self.max_pages}")
+                raise ValueError(
+                    f"PDF has {len(doc)} pages, maximum is {self.max_pages}"
+                )
             
             pages_data = []
+            word_counts = {}
             
             logger.info(f"📄 Extracting text from {len(doc)} pages")
             
@@ -52,11 +57,12 @@ class PDFProcessor:
                 width = rect.width
                 height = rect.height
                 
-                # Detect SAP module (heuristic)
-                sap_module = self._detect_sap_module(text)
-                
                 # Count words
                 word_count = len(text.split())
+                word_counts[page_num + 1] = word_count
+                
+                # Detect SAP module (heuristic)
+                sap_module = self._detect_sap_module(text)
                 
                 pages_data.append({
                     "page_number": page_num + 1,
@@ -67,14 +73,21 @@ class PDFProcessor:
                     "sap_module": sap_module
                 })
                 
-                logger.debug(f"Page {page_num + 1}: {word_count} words, module: {sap_module}")
+                logger.debug(
+                    f"Page {page_num + 1}: {word_count} words, "
+                    f"module: {sap_module}"
+                )
             
             doc.close()
             
             total_words = sum(p['word_count'] for p in pages_data)
-            logger.info(f"✅ Text extraction complete - {len(pages_data)} pages, {total_words} words")
             
-            return pages_data
+            logger.info(
+                f"✅ Text extraction complete - "
+                f"{len(pages_data)} pages, {total_words} words"
+            )
+            
+            return pages_data, word_counts
             
         except Exception as e:
             logger.error(f"❌ Text extraction failed: {e}")
@@ -125,7 +138,7 @@ class PDFProcessor:
             pdf_path: Path to PDF file
             
         Returns:
-            Processing results
+            Processing results including word counts per page
         """
         try:
             logger.info(f"🚀 Starting full PDF processing - {document_id}")
@@ -138,7 +151,19 @@ class PDFProcessor:
             metadata = self.get_metadata(pdf_path)
             
             # Extract text from all pages
-            pages_data = self.extract_text(pdf_path)
+            pages_data, word_counts = self.extract_text(pdf_path)
+            
+            # Create text chunks for embedding
+            chunks = []
+            for page in pages_data:
+                if page['word_count'] > 0:
+                    page_chunks = self.chunk_text(page['text'])
+                    for i, chunk_text in enumerate(page_chunks):
+                        chunks.append({
+                            "content": chunk_text,
+                            "page_number": page['page_number'],
+                            "chunk_index": i
+                        })
             
             # Update document counts
             with get_db() as db:
@@ -152,15 +177,19 @@ class PDFProcessor:
             result = {
                 "document_id": document_id,
                 "metadata": metadata,
-                "pages": pages_data,
-                "total_pages": len(pages_data),
+                "text_content": "\n\n".join(p['text'] for p in pages_data),
+                "page_count": len(pages_data),
+                "word_counts": word_counts,  # NEW: For image service
+                "chunks": chunks,
                 "total_words": sum(p['word_count'] for p in pages_data),
                 "success": True
             }
             
             logger.info(
                 f"✅ PDF processing complete - {document_id} - "
-                f"{result['total_pages']} pages, {result['total_words']} words"
+                f"{result['page_count']} pages, "
+                f"{result['total_words']} words, "
+                f"{len(chunks)} chunks"
             )
             
             return result
@@ -188,16 +217,45 @@ class PDFProcessor:
         
         # SAP module keywords
         modules = {
-            "MM": ["material management", "procurement", "purchasing", "mm transaction"],
-            "SD": ["sales and distribution", "sales order", "delivery", "billing"],
-            "FI": ["financial accounting", "general ledger", "accounts payable", "accounts receivable"],
-            "CO": ["controlling", "cost center", "profit center", "internal order"],
-            "PP": ["production planning", "manufacturing", "work order", "bom"],
-            "QM": ["quality management", "inspection", "quality notification"],
-            "PM": ["plant maintenance", "equipment", "work order", "maintenance"],
-            "HR": ["human resources", "personnel", "payroll", "organizational management"],
-            "WM": ["warehouse management", "storage location", "transfer order"],
-            "PS": ["project system", "wbs", "project structure"],
+            "MM": [
+                "material management", "procurement", "purchasing", 
+                "mm transaction"
+            ],
+            "SD": [
+                "sales and distribution", "sales order", "delivery", 
+                "billing"
+            ],
+            "FI": [
+                "financial accounting", "general ledger", 
+                "accounts payable", "accounts receivable"
+            ],
+            "CO": [
+                "controlling", "cost center", "profit center", 
+                "internal order"
+            ],
+            "PP": [
+                "production planning", "manufacturing", "work order", 
+                "bom"
+            ],
+            "QM": [
+                "quality management", "inspection", 
+                "quality notification"
+            ],
+            "PM": [
+                "plant maintenance", "equipment", "work order", 
+                "maintenance"
+            ],
+            "HR": [
+                "human resources", "personnel", "payroll", 
+                "organizational management"
+            ],
+            "WM": [
+                "warehouse management", "storage location", 
+                "transfer order"
+            ],
+            "PS": [
+                "project system", "wbs", "project structure"
+            ],
         }
         
         for module, keywords in modules.items():
@@ -206,7 +264,12 @@ class PDFProcessor:
         
         return "Unknown"
     
-    def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+    def chunk_text(
+        self, 
+        text: str, 
+        chunk_size: int = 500, 
+        overlap: int = 50
+    ) -> List[str]:
         """
         Split text into chunks for embedding
         
