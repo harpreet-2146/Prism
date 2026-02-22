@@ -1,116 +1,118 @@
+// backend/src/services/vector/embedding-search.service.js
 'use strict';
 
-const { HfInference } = require('@huggingface/inference');
-const config = require('../../config');
+const { PrismaClient } = require('@prisma/client');
 const { logger } = require('../../utils/logger');
+const pythonClient = require('../python-client.service');
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
+const prisma = new PrismaClient();
 
-class EmbeddingService {
+const BASE_URL = process.env.BASE_URL || 'http://localhost:5000';
+
+class EmbeddingSearchService {
   constructor() {
-    // ✅ NO baseUrl - let library handle it
-    this.hf = config.HF_TOKEN ? new HfInference(config.HF_TOKEN) : null;
-    this.model = config.HF_EMBEDDING_MODEL;
-    this.dimension = 384;
+    logger.info('EmbeddingSearchService initialized — using Voyage AI via Python', {
+      component: 'embedding-search'
+    });
   }
 
-  async generateEmbedding(text) {
-    if (!this.hf) {
-      throw new Error('HF_TOKEN not configured');
-    }
-
-    if (!text || text.trim().length === 0) {
-      throw new Error('Cannot embed empty text');
-    }
-
-    const truncated = text.trim().slice(0, 2000);
-    return await this._callWithRetry(truncated);
-  }
-
-  async generateBatchEmbeddings(texts, batchSize = 8) {
-    if (!this.hf) {
-      throw new Error('HF_TOKEN not configured');
-    }
-
-    const results = [];
-
-    for (let i = 0; i < texts.length; i += batchSize) {
-      const batch = texts.slice(i, i + batchSize);
-      const batchResults = await Promise.all(
-        batch.map(text => this.generateEmbedding(text))
-      );
-      results.push(...batchResults);
-
-      if (i + batchSize < texts.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-
-      logger.info('Embedding batch progress', {
-        processed: Math.min(i + batchSize, texts.length),
-        total: texts.length,
-        component: 'embedding-service'
-      });
-    }
-
-    return results;
-  }
-
-  async _callWithRetry(text, attempt = 1) {
+  /**
+   * Search embeddings for a user query.
+   * Generates query embedding via Voyage AI, cosine-compares against all user embeddings in DB.
+   */
+  async search(userId, query, topK = 10) {
     try {
-      // ✅ Simple call - no custom options
-      const result = await this.hf.featureExtraction({
-        model: this.model,
-        inputs: text
+      logger.info('Searching embeddings', {
+        userId, query: query.substring(0, 50), topK, component: 'embedding-search'
       });
 
-      const embedding = this._flattenEmbedding(result);
+      // Generate query embedding via Voyage AI (fast — ~200ms)
+      const [queryEmbedding] = await pythonClient.generateEmbeddings([query]);
 
-      if (!embedding || embedding.length !== this.dimension) {
-        throw new Error(
-          `Unexpected embedding dimension: got ${embedding?.length}, expected ${this.dimension}`
-        );
+      // Fetch all user embeddings with document + image info
+      const userEmbeddings = await prisma.embedding.findMany({
+        where: { userId },
+        include: {
+          document: { select: { originalName: true } },
+          sourceImage: { select: { storagePath: true } }
+        }
+      });
+
+      if (!userEmbeddings.length) {
+        logger.info('No embeddings found for user', { userId, component: 'embedding-search' });
+        return [];
       }
 
-      return embedding;
+      // Cosine similarity scoring
+      const scored = userEmbeddings.map(e => {
+        const score = this._cosineSimilarity(queryEmbedding, e.embedding);
+
+        let imageUrl = null;
+        if (e.sourceImage?.storagePath) {
+          const filename = e.sourceImage.storagePath.split(/[/\\]/).pop();
+          imageUrl = `${BASE_URL}/outputs/${filename}`;
+        }
+
+        return {
+          id: e.id,
+          text: e.text,
+          pageNumber: e.pageNumber,
+          documentId: e.documentId,
+          documentName: e.document?.originalName || 'Unknown',
+          sourceType: e.sourceType,
+          sourceImageId: e.sourceImageId,
+          imageUrl,
+          score
+        };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const results = scored.slice(0, topK);
+
+      logger.info('Search complete', {
+        userId,
+        totalEmbeddings: userEmbeddings.length,
+        returned: results.length,
+        topScore: results[0]?.score?.toFixed(3),
+        component: 'embedding-search'
+      });
+
+      return results;
 
     } catch (error) {
-      const isRetryable =
-        error.message?.includes('rate limit') ||
-        error.message?.includes('loading') ||
-        error.message?.includes('503') ||
-        error.message?.includes('504') ||
-        error.status === 503 ||
-        error.status === 504;
-
-      if (isRetryable && attempt < MAX_RETRIES) {
-        const delay = RETRY_DELAY_MS * attempt;
-        logger.warn('Embedding API retry', {
-          attempt,
-          delay,
-          error: error.message,
-          component: 'embedding-service'
-        });
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return this._callWithRetry(text, attempt + 1);
-      }
-
-      logger.error('Embedding generation failed', {
-        error: error.message,
-        model: this.model,
-        attempt,
-        component: 'embedding-service'
+      logger.error('Search failed', {
+        userId, query: query.substring(0, 50), error: error.message, component: 'embedding-search'
       });
       throw error;
     }
   }
 
-  _flattenEmbedding(result) {
-    if (Array.isArray(result) && Array.isArray(result[0])) {
-      return Array.from(result[0]);
+  async deleteDocumentEmbeddings(documentId) {
+    const result = await prisma.embedding.deleteMany({ where: { documentId } });
+    logger.info('Document embeddings deleted', { documentId, count: result.count, component: 'embedding-search' });
+    return result;
+  }
+
+  async getDocumentEmbeddingCount(documentId) {
+    return prisma.embedding.count({ where: { documentId } });
+  }
+
+  _cosineSimilarity(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
     }
-    return Array.from(result);
+    normA = Math.sqrt(normA);
+    normB = Math.sqrt(normB);
+    return normA && normB ? dot / (normA * normB) : 0;
+  }
+
+  healthCheck() {
+    return { configured: true, backend: 'Voyage AI via Python', status: 'ready' };
   }
 }
 
-module.exports = new EmbeddingService();
+module.exports = new EmbeddingSearchService();
