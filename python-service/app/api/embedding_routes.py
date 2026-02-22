@@ -1,10 +1,11 @@
+# python-service/app/api/embedding_routes.py
 """
-Embedding Generation API Routes
+Embedding Generation API Routes — backed by Voyage AI
 """
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import List, Optional, Union
+from typing import List, Optional
 import logging
 
 from app.services.embedding_service import embedding_service
@@ -14,17 +15,14 @@ router = APIRouter()
 
 
 class GenerateEmbeddingRequest(BaseModel):
-    """Single text embedding request"""
     text: str
 
 
 class BatchEmbeddingRequest(BaseModel):
-    """Batch embedding request"""
     texts: List[str]
 
 
 class DocumentChunk(BaseModel):
-    """Document chunk for embedding"""
     text: str
     page_number: int
     chunk_index: int
@@ -33,14 +31,12 @@ class DocumentChunk(BaseModel):
 
 
 class ProcessDocumentRequest(BaseModel):
-    """Process all chunks for a document"""
     document_id: str
     user_id: str
     chunks: List[DocumentChunk]
 
 
 class SearchRequest(BaseModel):
-    """Similarity search request"""
     query: str
     embeddings: List[dict]
     top_k: int = 5
@@ -49,53 +45,34 @@ class SearchRequest(BaseModel):
 @router.post("/generate")
 async def generate_embeddings(request: Request):
     """
-    Generate embeddings - accepts BOTH formats:
-    1. Array format (from backend): ["text1", "text2", ...]
-    2. Object format: {"texts": ["text1", "text2", ...]}
-    
-    Backend sends: POST /api/embeddings/generate with array of texts
+    Generate embeddings — accepts array or object format.
+    Backend sends: POST /api/embeddings/generate with array of strings.
+    Returns array of vectors (matches backend expectation).
     """
     try:
-        # Get raw body
         body = await request.json()
-        
-        # Handle both formats
+
         if isinstance(body, list):
-            # Direct array from backend
             texts = body
-            logger.info(f"📝 Received array format: {len(texts)} texts")
         elif isinstance(body, dict) and 'texts' in body:
-            # Object with texts field
             texts = body['texts']
-            logger.info(f"📝 Received object format: {len(texts)} texts")
         elif isinstance(body, dict) and 'text' in body:
-            # Single text
             texts = [body['text']]
-            logger.info(f"📝 Received single text")
         else:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid request format. Expected array or {{texts: []}}. Got: {type(body)}"
-            )
-        
-        # Validate
+            raise HTTPException(status_code=400, detail=f"Invalid format. Expected array or {{texts: []}}.")
+
         if not texts:
             raise HTTPException(status_code=400, detail="No texts provided")
-        
-        if len(texts) > 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Batch too large: {len(texts)} texts (max 200)"
-            )
-        
-        # Generate embeddings
+
+        if len(texts) > 500:
+            raise HTTPException(status_code=400, detail=f"Batch too large: {len(texts)} (max 500)")
+
         embeddings = embedding_service.generate_batch_embeddings(texts)
-        
-        logger.info(f"✅ Generated {len(embeddings)} embeddings")
-        
-        # Return as array (matches backend expectation)
+        logger.info(f"✅ Generated {len(embeddings)} embeddings via Voyage AI")
+
+        # Return raw array — matches what Node backend expects
         return embeddings
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -105,153 +82,83 @@ async def generate_embeddings(request: Request):
 
 @router.post("/generate-single")
 async def generate_single_embedding(request: GenerateEmbeddingRequest):
-    """
-    Generate embedding for a single text
-    """
     try:
-        if not request.text or not request.text.strip():
+        if not request.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
-        
         embedding = embedding_service.generate_embedding(request.text)
-        
-        return {
-            "success": True,
-            "data": {
-                "embedding": embedding,
-                "dimension": len(embedding)
-            }
-        }
-        
+        return {"success": True, "data": {"embedding": embedding, "dimension": len(embedding)}}
     except Exception as e:
-        logger.error(f"Embedding generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/generate-batch")
 async def generate_batch_embeddings(request: BatchEmbeddingRequest):
-    """
-    Generate embeddings for multiple texts in batch (FAST)
-    """
     try:
         if not request.texts:
             raise HTTPException(status_code=400, detail="No texts provided")
-        
-        if len(request.texts) > 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Batch too large: {len(request.texts)} texts (max 200)"
-            )
-        
         embeddings = embedding_service.generate_batch_embeddings(request.texts)
-        
         return {
             "success": True,
-            "data": {
-                "embeddings": embeddings,
-                "count": len(embeddings),
-                "dimension": len(embeddings[0]) if embeddings else 0
-            }
+            "data": {"embeddings": embeddings, "count": len(embeddings), "dimension": len(embeddings[0]) if embeddings else 0}
         }
-        
     except Exception as e:
-        logger.error(f"Batch embedding generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/generate-query")
+async def generate_query_embedding(request: GenerateEmbeddingRequest):
+    """
+    Generate a QUERY embedding (optimized for search, not document storage).
+    Use this for chat search queries for better retrieval accuracy.
+    """
+    try:
+        if not request.text.strip():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+        embedding = embedding_service.generate_query_embedding(request.text)
+        return {"success": True, "data": {"embedding": embedding, "dimension": len(embedding)}}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/process-document")
 async def process_document_embeddings(request: ProcessDocumentRequest):
-    """
-    Process all chunks for a document and save embeddings
-    """
     try:
         if not request.chunks:
             raise HTTPException(status_code=400, detail="No chunks provided")
-        
-        # Convert Pydantic models to dicts
         chunks_data = [chunk.dict() for chunk in request.chunks]
-        
-        result = embedding_service.process_document_chunks(
-            request.document_id,
-            request.user_id,
-            chunks_data
-        )
-        
+        result = embedding_service.process_document_chunks(request.document_id, request.user_id, chunks_data)
         if not result['success']:
             raise HTTPException(status_code=500, detail=result.get('error'))
-        
-        return {
-            "success": True,
-            "data": result
-        }
-        
+        return {"success": True, "data": result}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Document embedding processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/search")
 async def search_similar_embeddings(request: SearchRequest):
-    """
-    Search for similar embeddings using cosine similarity
-    """
     try:
-        if not request.query or not request.query.strip():
+        if not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        if not request.embeddings:
-            raise HTTPException(status_code=400, detail="No embeddings provided")
-        
-        results = embedding_service.search_similar(
-            request.query,
-            request.embeddings,
-            request.top_k
-        )
-        
-        return {
-            "success": True,
-            "data": {
-                "results": results,
-                "count": len(results)
-            }
-        }
-        
+        results = embedding_service.search_similar(request.query, request.embeddings, request.top_k)
+        return {"success": True, "data": {"results": results, "count": len(results)}}
     except Exception as e:
-        logger.error(f"Similarity search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/dimension")
 async def get_embedding_dimension():
-    """
-    Get the dimension of embeddings produced by this model
-    """
     try:
         dimension = embedding_service.get_embedding_dimension()
-        
-        return {
-            "success": True,
-            "data": {
-                "dimension": dimension,
-                "model": embedding_service.model_name
-            }
-        }
-        
+        return {"success": True, "data": {"dimension": dimension, "model": embedding_service.model, "provider": "voyage-ai"}}
     except Exception as e:
-        logger.error(f"Failed to get dimension: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/health")
 async def embedding_health():
-    """Check embedding service health"""
     health = embedding_service.health_check()
-    
     if not health['available']:
         raise HTTPException(status_code=503, detail="Embedding service unavailable")
-    
-    return {
-        "success": True,
-        "data": health
-    }
+    return {"success": True, "data": health}
