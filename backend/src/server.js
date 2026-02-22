@@ -7,6 +7,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
+const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 
 const config = require('./config');
@@ -32,7 +33,7 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// CORS - IMPORTANT for frontend
+// CORS
 app.use(cors({
   origin: config.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
@@ -76,15 +77,20 @@ console.log('✅ Health check configured\n');
 // STATIC FILE SERVING
 // ================================================================
 
-const path = require('path');
+console.log('→ Setting up static file serving...');
 
-// Serve uploaded files (images from documents)
+// Serve uploaded PDFs
 const uploadsPath = path.join(__dirname, '../uploads');
 app.use('/uploads', express.static(uploadsPath));
 console.log('✅ Static uploads folder:', uploadsPath);
 
+// Serve extracted PDF images (page renders + embedded images from Python service)
+const outputsPath = path.resolve(__dirname, '../../python-service/data/outputs');
+app.use('/outputs', express.static(outputsPath));
+console.log('✅ Static outputs folder:', outputsPath);
+
 // ================================================================
-// API ROUTES - WITH ERROR HANDLING
+// API ROUTES
 // ================================================================
 
 console.log('→ Loading routes...\n');
@@ -190,6 +196,7 @@ app.listen(PORT, async () => {
   console.log(`🌍 Environment: ${config.NODE_ENV}`);
   console.log(`🔗 API: http://localhost:${PORT}/api`);
   console.log(`🎨 Frontend: ${config.FRONTEND_URL || 'http://localhost:5173'}`);
+  console.log(`🖼️  Images: http://localhost:${PORT}/outputs/<filename>`);
   console.log('='.repeat(60) + '\n');
 
   // Connect to database
