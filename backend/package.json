@@ -15,7 +15,7 @@
     "generate": "prisma generate"
   },
   "dependencies": {
-    "@huggingface/inference": "^2.6.4",
+    "@huggingface/inference": "^4.13.12",
     "@prisma/client": "^5.8.1",
     "@tavily/core": "^0.7.1",
     "axios": "^1.13.5",
