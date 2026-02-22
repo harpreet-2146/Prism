@@ -1,171 +1,270 @@
-// backend/src/services/ocr.service.js
-'use strict';
+# python-service/app/services/ocr_service.py
+"""
+OCR Service - OCR Space API (primary) + EasyOCR (fallback)
+Concurrent processing: 10 images simultaneously
+"""
 
-const FormData = require('form-data');
-const axios = require('axios');
-const fs = require('fs');
-const config = require('../config');
-const { logger } = require('../utils/logger');
+import aiohttp
+import asyncio
+import concurrent.futures
+import easyocr
+from PIL import Image
+import base64
+import logging
+from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+import time
+from pathlib import Path
+import numpy as np
 
-const OCR_API_URL = 'https://api.ocr.space/parse/image';
-const RATE_LIMIT_DELAY_MS = 1200; // Free tier: ~1 request per second, adding buffer
+from app.config import settings
+from app.database import get_db, update_image_ocr, get_pending_ocr_images
 
-class OCRService {
-  constructor() {
-    this.apiKey = config.OCR_SPACE_API_KEY;
-    this.engine = config.OCR_SPACE_ENGINE;
-    this.language = config.OCR_SPACE_LANGUAGE;
-  }
+logger = logging.getLogger(__name__)
 
-  /**
-   * Process a single image file with OCR.space API
-   * @param {string} imagePath - Absolute path to image file
-   * @returns {Promise<{text: string, confidence: number}>}
-   */
-  async processImage(imagePath) {
-    if (!this.apiKey) {
-      logger.warn('OCR_SPACE_API_KEY not configured, skipping OCR', {
-        component: 'ocr-service'
-      });
-      return { text: '', confidence: 0 };
-    }
+OCR_SPACE_CONCURRENCY = 10
 
-    try {
-      const form = new FormData();
-      form.append('file', fs.createReadStream(imagePath));
-      form.append('apikey', this.apiKey);
-      form.append('language', this.language);
-      form.append('isOverlayRequired', 'false');
-      form.append('detectOrientation', 'true');
-      form.append('scale', 'true');
-      form.append('OCREngine', this.engine.toString());
 
-      logger.info('Starting OCR processing', {
-        imagePath,
-        language: this.language,
-        engine: this.engine,
-        component: 'ocr-service'
-      });
+class OCRService:
+    def __init__(self):
+        self.languages = settings.OCR_LANGUAGES.split(',')
+        self.gpu = settings.OCR_GPU
+        self.batch_size = settings.OCR_BATCH_SIZE
+        self.workers = settings.OCR_WORKERS
 
-      const response = await axios.post(OCR_API_URL, form, {
-        headers: form.getHeaders(),
-        timeout: 30000
-      });
+        self.ocr_space_key = getattr(settings, 'OCR_SPACE_API_KEY', None)
+        self.ocr_space_engine = getattr(settings, 'OCR_SPACE_ENGINE', 2)
+        self.ocr_space_language = getattr(settings, 'OCR_SPACE_LANGUAGE', 'eng')
 
-      if (response.data.IsErroredOnProcessing) {
-        const errorMsg = response.data.ErrorMessage?.[0] || 'Unknown OCR error';
-        throw new Error(errorMsg);
-      }
+        self._easyocr_reader = None
 
-      const parsedResult = response.data.ParsedResults?.[0];
-      if (!parsedResult) {
-        throw new Error('No OCR results returned');
-      }
+        if self.ocr_space_key:
+            logger.info(f"✅ OCR Space API configured (engine {self.ocr_space_engine}) — primary OCR")
+        else:
+            logger.warning("⚠️  OCR_SPACE_API_KEY not set — using EasyOCR only")
 
-      const text = parsedResult.ParsedText || '';
-      const exitCode = parsedResult.FileParseExitCode;
-      
-      // Exit code 1 = success, others = partial/failed
-      const confidence = exitCode === 1 ? 0.95 : 0.5;
+    @property
+    def easyocr_reader(self):
+        if self._easyocr_reader is None:
+            logger.info("Loading EasyOCR (fallback)...")
+            self._easyocr_reader = easyocr.Reader(
+                self.languages, gpu=self.gpu,
+                model_storage_directory=settings.MODEL_CACHE_DIR,
+                download_enabled=True
+            )
+        return self._easyocr_reader
 
-      logger.info('OCR processing complete', {
-        imagePath,
-        textLength: text.length,
-        confidence,
-        exitCode,
-        component: 'ocr-service'
-      });
+    def _run_async(self, coro):
+        """
+        Safely run async coroutine from sync context even inside FastAPI's event loop.
+        Spawns a new thread with its own event loop to avoid 'cannot be called from
+        a running event loop' error.
+        """
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
 
-      return {
-        text: text.trim(),
-        confidence
-      };
+    # ─────────────────────────────────────────────────────────────────────────
+    # PUBLIC API
+    # ─────────────────────────────────────────────────────────────────────────
 
-    } catch (error) {
-      logger.error('OCR processing failed', {
-        imagePath,
-        error: error.message,
-        component: 'ocr-service'
-      });
+    def process_image(self, image_path: str, image_id: str) -> Dict:
+        if self.ocr_space_key:
+            return self._run_async(self._ocr_space_single(image_path, image_id))
+        return self._easyocr_single(image_path, image_id)
 
-      // Return empty result instead of crashing
-      return { text: '', confidence: 0 };
-    }
-  }
+    def process_batch(self, images: List[Dict]) -> List[Dict]:
+        if not images:
+            return []
 
-  /**
-   * Process multiple images with rate limiting
-   * @param {Array<{path: string, id: string}>} images - Array of image objects
-   * @param {Function} onProgress - Progress callback (current, total, percent)
-   * @returns {Promise<Array<{id: string, text: string, confidence: number}>>}
-   */
-  async processImages(images, onProgress) {
-    if (!this.apiKey) {
-      logger.warn('OCR_SPACE_API_KEY not configured, skipping all OCR', {
-        component: 'ocr-service'
-      });
-      return images.map(img => ({ id: img.id, text: '', confidence: 0 }));
-    }
+        start = time.time()
+        logger.info(f"🚀 OCR batch: {len(images)} images, concurrency={OCR_SPACE_CONCURRENCY}")
 
-    const results = [];
-    const total = images.length;
+        if self.ocr_space_key:
+            results = self._run_async(self._ocr_space_batch_concurrent(images))
+        else:
+            results = self._easyocr_batch(images)
 
-    logger.info('Starting batch OCR processing', {
-      totalImages: total,
-      component: 'ocr-service'
-    });
+        duration = time.time() - start
+        ok = sum(1 for r in results if r['status'] == 'completed')
+        logger.info(f"✅ OCR batch done: {ok}/{len(images)} succeeded in {duration:.1f}s")
+        return results
 
-    for (let i = 0; i < total; i++) {
-      const image = images[i];
+    def process_document_images(self, document_id: str) -> Dict:
+        start = time.time()
+        try:
+            with get_db() as db:
+                pending = get_pending_ocr_images(db, document_id)
 
-      // Process image
-      const result = await this.processImage(image.path);
+            if not pending:
+                return {"document_id": document_id, "images_processed": 0, "success": True}
 
-      results.push({
-        id: image.id,
-        ...result
-      });
+            images = [{"id": str(r[0]), "path": r[1], "page_number": r[2]} for r in pending]
+            logger.info(f"Processing {len(images)} OCR images for doc {document_id}")
 
-      // Progress callback
-      if (onProgress) {
-        const current = i + 1;
-        const percent = Math.round((current / total) * 100);
-        onProgress({ current, total, percent });
-      }
+            all_results = []
+            for i in range(0, len(images), self.batch_size):
+                batch = images[i:i + self.batch_size]
+                batch_results = self.process_batch(batch)
+                all_results.extend(batch_results)
 
-      // Rate limiting: Wait between requests (free tier = ~1 req/sec)
-      if (i < total - 1) {
-        await this._sleep(RATE_LIMIT_DELAY_MS);
-      }
-    }
+                with get_db() as db:
+                    for r in batch_results:
+                        update_image_ocr(db, r['id'], r.get('text', ''),
+                                         r.get('confidence', 0), r['status'])
 
-    logger.info('Batch OCR processing complete', {
-      totalProcessed: results.length,
-      successful: results.filter(r => r.text.length > 0).length,
-      component: 'ocr-service'
-    });
+            ok = sum(1 for r in all_results if r['status'] == 'completed')
+            return {
+                "document_id": document_id,
+                "images_processed": len(all_results),
+                "images_successful": ok,
+                "duration": round(time.time() - start, 2),
+                "success": True
+            }
+        except Exception as e:
+            logger.error(f"Document OCR failed: {e}")
+            return {"document_id": document_id, "images_processed": 0, "success": False, "error": str(e)}
 
-    return results;
-  }
+    def health_check(self) -> Dict:
+        return {
+            "available": True,
+            "engine": "OCR Space" if self.ocr_space_key else "EasyOCR",
+            "ocr_space_configured": bool(self.ocr_space_key),
+            "languages": self.languages,
+            "concurrency": OCR_SPACE_CONCURRENCY
+        }
 
-  /**
-   * Health check for OCR service
-   */
-  healthCheck() {
-    return {
-      configured: Boolean(this.apiKey),
-      engine: this.engine,
-      language: this.language,
-      status: this.apiKey ? 'ready' : 'not_configured'
-    };
-  }
+    # ─────────────────────────────────────────────────────────────────────────
+    # OCR SPACE — ASYNC CONCURRENT
+    # ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Sleep utility for rate limiting
-   */
-  _sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-}
+    async def _ocr_space_batch_concurrent(self, images: List[Dict]) -> List[Dict]:
+        semaphore = asyncio.Semaphore(OCR_SPACE_CONCURRENCY)
 
-module.exports = new OCRService();
+        async def process_one(img):
+            async with semaphore:
+                try:
+                    return await self._ocr_space_call(img['path'], img['id'])
+                except Exception as e:
+                    logger.warning(f"OCR Space failed for {img['id']}, trying EasyOCR: {e}")
+                    return self._easyocr_single(img['path'], img['id'])
+
+        async with aiohttp.ClientSession() as session:
+            self._session = session
+            tasks = [process_one(img) for img in images]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        final = []
+        for img, result in zip(images, results):
+            if isinstance(result, Exception):
+                final.append(self._easyocr_single(img['path'], img['id']))
+            elif not result.get('text', '').strip():
+                fallback = self._easyocr_single(img['path'], img['id'])
+                final.append(fallback if fallback.get('text', '').strip() else result)
+            else:
+                final.append(result)
+
+        return final
+
+    async def _ocr_space_call(self, image_path: str, image_id: str) -> Dict:
+        start = time.time()
+
+        if not Path(image_path).exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        with open(image_path, 'rb') as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+
+        ext = Path(image_path).suffix.lower().lstrip('.')
+        mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+
+        payload = {
+            'base64Image': f'data:{mime};base64,{image_data}',
+            'language': self.ocr_space_language,
+            'isOverlayRequired': False,
+            'isTable': True,
+            'scale': True,
+            'ocrengine': self.ocr_space_engine,
+        }
+
+        async with self._session.post(
+            'https://api.ocr.space/parse/image',
+            data=payload,
+            headers={'apikey': self.ocr_space_key},
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            data = await resp.json()
+
+        if data.get('IsErroredOnProcessing'):
+            raise Exception(data.get('ErrorMessage', 'OCR Space error'))
+
+        parsed = data.get('ParsedResults', [])
+        text = self._clean_text(' '.join(r.get('ParsedText', '') for r in parsed))
+
+        return {
+            'id': image_id,
+            'text': text,
+            'confidence': 95.0 if text else 0.0,
+            'status': 'completed',
+            'duration': round(time.time() - start, 2),
+            'engine': 'ocr_space'
+        }
+
+    async def _ocr_space_single(self, image_path: str, image_id: str) -> Dict:
+        async with aiohttp.ClientSession() as session:
+            self._session = session
+            try:
+                return await self._ocr_space_call(image_path, image_id)
+            except Exception as e:
+                logger.warning(f"OCR Space failed, using EasyOCR: {e}")
+                return self._easyocr_single(image_path, image_id)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # EASYOCR FALLBACK
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _easyocr_single(self, image_path: str, image_id: str) -> Dict:
+        start = time.time()
+        try:
+            if not Path(image_path).exists():
+                raise FileNotFoundError(f"Image not found: {image_path}")
+
+            image = Image.open(image_path)
+            results = self.easyocr_reader.readtext(np.array(image))
+            texts = [t for (_, t, c) in results if c > 0.3]
+            confidences = [c for (_, _, c) in results if c > 0.3]
+            full_text = self._clean_text(' '.join(texts))
+            avg_conf = (sum(confidences) / len(confidences) * 100) if confidences else 0
+
+            return {
+                'id': image_id, 'text': full_text,
+                'confidence': round(avg_conf, 2), 'status': 'completed',
+                'duration': round(time.time() - start, 2), 'engine': 'easyocr'
+            }
+        except Exception as e:
+            logger.error(f"EasyOCR failed for {image_id}: {e}")
+            return {
+                'id': image_id, 'text': '', 'confidence': 0,
+                'status': 'failed', 'duration': round(time.time() - start, 2),
+                'engine': 'easyocr', 'error': str(e)
+            }
+
+    def _easyocr_batch(self, images: List[Dict]) -> List[Dict]:
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = {executor.submit(self._easyocr_single, img['path'], img['id']): img for img in images}
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result(timeout=60))
+                except Exception as e:
+                    img = futures[future]
+                    results.append({'id': img['id'], 'text': '', 'confidence': 0,
+                                    'status': 'failed', 'error': str(e)})
+        return results
+
+    def _clean_text(self, text: str) -> str:
+        return " ".join(text.split()).strip() if text else ""
+
+
+# Global instance
+ocr_service = OCRService()
