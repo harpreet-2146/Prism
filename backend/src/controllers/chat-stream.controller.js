@@ -3,222 +3,269 @@
 
 const { PrismaClient } = require('@prisma/client');
 const Groq = require('groq-sdk');
+const axios = require('axios');
 const embeddingSearchService = require('../services/vector/embedding-search.service');
-const tavilyService = require('../services/tavily.service'); // 🆕 NEW
+const tavilyService = require('../services/tavily.service');
 
 const prisma = new PrismaClient();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const BASE_URL = process.env.BASE_URL || 'http://localhost:5000';
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+
+function toImageUrl(storagePath) {
+  if (!storagePath) return null;
+  const filename = storagePath.split(/[/\\]/).pop();
+  return `${BASE_URL}/outputs/${filename}`;
+}
+
+function extractPageNumbersFromText(text) {
+  const pages = new Set();
+  const patterns = [
+    /\[Ref:\s*Page[s]?\s*(\d+)(?:\s*[-–]\s*(\d+))?\]/gi,
+    /\[Ref:\s*Pages?\s*([\d,\s]+)\]/gi,
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const nums = match[0].match(/\d+/g) || [];
+      nums.forEach(n => {
+        const p = parseInt(n);
+        pages.add(Math.max(1, p - 1));
+        pages.add(p);
+        pages.add(p + 1);
+      });
+    }
+  }
+  return Array.from(pages).sort((a, b) => a - b);
+}
+
+async function findImagesForResponse(responseText, relevantChunks, documentIds) {
+  try {
+    let pageNumbers = extractPageNumbersFromText(responseText);
+
+    if (pageNumbers.length === 0 && relevantChunks.length > 0) {
+      const chunkPages = new Set();
+      for (const chunk of relevantChunks) {
+        if (chunk.pageNumber) {
+          for (let p = Math.max(1, chunk.pageNumber - 1); p <= chunk.pageNumber + 1; p++) {
+            chunkPages.add(p);
+          }
+        }
+      }
+      pageNumbers = Array.from(chunkPages).sort((a, b) => a - b);
+    }
+
+    if (pageNumbers.length === 0) return [];
+
+    const images = await prisma.documentImage.findMany({
+      where: { documentId: { in: documentIds }, pageNumber: { in: pageNumbers } },
+      orderBy: [{ pageNumber: 'asc' }, { imageIndex: 'asc' }]
+    });
+
+    const sourceImageIds = relevantChunks.filter(c => c.sourceImageId).map(c => c.sourceImageId);
+    let directImages = [];
+    if (sourceImageIds.length > 0) {
+      directImages = await prisma.documentImage.findMany({ where: { id: { in: sourceImageIds } } });
+    }
+
+    const seen = new Set();
+    const merged = [];
+    for (const img of [...directImages, ...images]) {
+      if (!seen.has(img.id)) { seen.add(img.id); merged.push(img); }
+    }
+    merged.sort((a, b) => a.pageNumber - b.pageNumber);
+
+    return merged.slice(0, 20).map(img => ({
+      url: toImageUrl(img.storagePath),
+      pageNumber: img.pageNumber,
+      imageIndex: img.imageIndex,
+      documentId: img.documentId,
+      width: img.width,
+      height: img.height
+    }));
+  } catch (err) {
+    console.error('Failed to fetch images:', err.message);
+    return [];
+  }
+}
 
 /**
- * SSE Stream chat response
- * GET /api/chat/conversations/:id/stream?message=...&token=...
+ * Search Tavily and fetch actual page content from top SAP results.
+ * Returns enriched results with real content, not just snippets.
  */
+async function searchAndFetchSAP(query) {
+  if (!TAVILY_API_KEY) return [];
+
+  try {
+    // Step 1: Search Tavily focused on SAP help portal
+    const searchRes = await axios.post('https://api.tavily.com/search', {
+      api_key: TAVILY_API_KEY,
+      query: `site:help.sap.com ${query}`,
+      search_depth: 'advanced',
+      max_results: 3,
+      include_raw_content: true,  // get full page content, not just snippet
+      include_domains: ['help.sap.com', 'community.sap.com', 'launchpad.support.sap.com']
+    }, { timeout: 8000 });
+
+    const results = searchRes.data?.results || [];
+
+    return results
+      .filter(r => r.content || r.raw_content)
+      .map(r => ({
+        title: r.title,
+        url: r.url,
+        // Use raw_content if available (full page), fall back to snippet
+        content: (r.raw_content || r.content || '').substring(0, 2000)
+      }));
+
+  } catch (err) {
+    console.error('Tavily search failed:', err.message);
+    return [];
+  }
+}
+
 const streamChatResponse = async (req, res) => {
   const conversationId = req.params.id;
   const message = req.query.message;
   const userId = req.user.userId;
 
-  console.log('🔥 SSE chat stream started', {
-    conversationId,
-    userId,
-    messagePreview: message?.substring(0, 50)
-  });
+  if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
 
-  if (!message?.trim()) {
-    return res.status(400).json({ error: 'Message is required' });
-  }
-
-  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
-
   res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
   res.flush?.();
 
   let conversation = null;
 
   try {
-    // Create or load conversation
+    // ─── Conversation ──────────────────────────────────────────────────────
     if (conversationId === 'new' || conversationId === 'undefined') {
-      console.log('📝 Creating new conversation');
-
       conversation = await prisma.conversation.create({
-        data: {
-          userId,
-          title:
-            message.substring(0, 50) +
-            (message.length > 50 ? '...' : '')
-        }
+        data: { userId, title: message.substring(0, 50) + (message.length > 50 ? '...' : '') }
       });
-
-      console.log('✅ Conversation created:', conversation.id);
-
-      res.write(`data: ${JSON.stringify({
-        type: 'conversation_created',
-        conversationId: conversation.id
-      })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'conversation_created', conversationId: conversation.id })}\n\n`);
       res.flush?.();
-
     } else {
-      conversation = await prisma.conversation.findFirst({
-        where: { id: conversationId, userId }
-      });
-
+      conversation = await prisma.conversation.findFirst({ where: { id: conversationId, userId } });
       if (!conversation) {
-        res.write(`data: ${JSON.stringify({
-          type: 'error',
-          error: 'Conversation not found'
-        })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'error', error: 'Conversation not found' })}\n\n`);
         return res.end();
       }
     }
 
-    // Save user message
     await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        role: 'user',
-        content: message
-      }
+      data: { conversationId: conversation.id, role: 'user', content: message }
     });
 
-    // 🆕 STEP 1: Search PDFs (ALWAYS)
-    console.log('🔍 Searching PDF documents...');
+    // ─── Search embeddings ─────────────────────────────────────────────────
     const relevantChunks = await embeddingSearchService.search(userId, message, 10);
-    console.log(`📚 PDF Context: ${relevantChunks.length} chunks`);
+    const documentIds = [...new Set(relevantChunks.map(c => c.documentId).filter(Boolean))];
 
-    // 🆕 STEP 2: Check if web search needed
-    const needsWebSearch = tavilyService.shouldSearchWeb(message);
+    // ─── Tavily: fetch real SAP content ───────────────────────────────────
+    // Run in parallel with no blocking — only if doc context seems thin
+    const docWordCount = relevantChunks.reduce((sum, c) => sum + (c.text?.split(' ').length || 0), 0);
+    const needsWebContext = docWordCount < 300; // doc context is thin, supplement with web
+
     let webResults = [];
-
-    if (needsWebSearch) {
-      console.log('🌐 Web search triggered');
-      
-      res.write(`data: ${JSON.stringify({
-        type: 'status',
-        message: 'Searching SAP community and documentation...'
-      })}\n\n`);
+    if (needsWebContext && TAVILY_API_KEY) {
+      res.write(`data: ${JSON.stringify({ type: 'status', message: 'Fetching SAP documentation...' })}\n\n`);
       res.flush?.();
-
-      const pdfContext = relevantChunks.map(chunk => ({
-        text: chunk.text,
-        sapModule: chunk.sapModule
-      }));
-
-      webResults = await tavilyService.search(message, pdfContext);
-      console.log(`🌐 Web results: ${webResults.length} found`);
+      webResults = await searchAndFetchSAP(message);
+      console.log(`🌐 Tavily: ${webResults.length} SAP pages fetched`);
     }
 
-    // Extract images from PDF context
-    const images = relevantChunks
-      .filter(chunk => chunk.imageUrl)
-      .map(chunk => ({
-        url: chunk.imageUrl,
-        pageNumber: chunk.pageNumber,
-        documentId: chunk.documentId,
-        documentName: chunk.documentName
-      }));
-
-    console.log(`🖼️ Images found: ${images.length}`);
-
-    // 🆕 Build enhanced context
+    // ─── Build context ─────────────────────────────────────────────────────
     let contextText = '';
 
-    // PDF context
     if (relevantChunks.length > 0) {
-      contextText += '\n\n📄 INFORMATION FROM YOUR UPLOADED DOCUMENTS:\n\n';
+      contextText += '\n\n📄 FROM YOUR UPLOADED DOCUMENTS:\n\n';
       contextText += relevantChunks.map((chunk, i) =>
-        `[${i + 1}] From "${chunk.documentName}" (Page ${chunk.pageNumber}):\n${chunk.text}`
+        `[${i + 1}] "${chunk.documentName}" (Page ${chunk.pageNumber}):\n${chunk.text}`
       ).join('\n\n');
     }
 
-    // Web context
     if (webResults.length > 0) {
-      contextText += '\n\n🌐 ADDITIONAL INFORMATION FROM SAP COMMUNITY:\n\n';
-      webResults.forEach((result, idx) => {
-        contextText += `[Web ${idx + 1}] ${result.title}\n`;
-        contextText += `${result.snippet}\n`;
-        contextText += `Source: ${result.url}\n\n`;
+      contextText += '\n\n🌐 FROM SAP HELP PORTAL:\n\n';
+      webResults.forEach((r, i) => {
+        contextText += `[SAP ${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content}\n\n`;
       });
     }
 
-    // Get conversation history
+    // ─── History ───────────────────────────────────────────────────────────
     const previousMessages = await prisma.message.findMany({
       where: { conversationId: conversation.id },
       orderBy: { createdAt: 'asc' },
       take: 10
     });
 
-    // 🆕 Enhanced system prompt
-    const systemPrompt = `You are PRISM, an expert SAP assistant${webResults.length > 0 ? ' with access to SAP community knowledge' : ''}.
+    // ─── System prompt ─────────────────────────────────────────────────────
+    const systemPrompt = `You are PRISM, an expert SAP trainer explaining procedures to a consultant who needs to actually perform the task in SAP.
 
-RESPONSE STYLE:
-- Provide detailed, step-by-step explanations
-- Include brief citations (e.g., "according to page 14..." or "based on SAP Community...")
-- Reference screenshots naturally when available
-- Balance technical accuracy with clarity
+CRITICAL RULES:
+- Explain HOW to do every action — which menu to open, which field to click, which button/key to press, what the screen looks like after
+- Never say "assign X" or "enter Y" without explaining the exact UI interaction
+  Example WRONG: "Assign a transport request"
+  Example RIGHT: "Click the Transport Request field → press F4 to open search help → double-click your request from the list → press Enter to confirm"
+- Always cite exact page numbers using [Ref: Page X] for every step
+- Use ONLY information from the provided context. If the document is vague, supplement with SAP web context provided
+- Quote exact field names, button labels, transaction codes, and menu paths as they appear in SAP
 
-${webResults.length > 0 ? '- Clearly distinguish between user documents vs. external sources\n- Prioritize official SAP documentation\n' : ''}
-FORMAT:
-1. **Step Name**: Explanation [Reference: Source]
-2. **Next Step**: Instructions [Reference: Source]
+FORMAT RULES:
+- ONLY generate a \`\`\`mermaid flowchart when a step has a genuine YES/NO decision branch (e.g. "if subpackage → enter superpackage, else skip"). Do NOT generate mermaid for linear steps — those get a progress flow automatically.
+- Use **Step N: [Action Name]** format for each step
+- For steps with branching logic or navigation flows, add a Mermaid flowchart INSIDE that step using \`\`\`mermaid blocks
+- Keep Mermaid diagrams simple: flowchart LR with max 6 nodes
+- Mermaid example for a branching step:
+\`\`\`mermaid
+flowchart LR
+    A[Open Context Menu] --> B[Click New ABAP Package]
+    B --> C{Subpackage?}
+    C -->|Yes| D[Enter Superpackage name]
+    C -->|No| E[Leave blank]
+    D --> F[Click Next]
+    E --> F
+\`\`\`
 
-Integrate citations naturally.`;
+Screenshots from referenced pages will be shown automatically — do not describe them in text.`;
 
     const messages = [
-      {
-        role: 'system',
-        content: systemPrompt
-      },
-      ...previousMessages.slice(0, -1).map(msg => ({
-        role: msg.role,
-        content: msg.content
-      })),
-      {
-        role: 'user',
-        content: message + contextText
-      }
+      { role: 'system', content: systemPrompt },
+      ...previousMessages.slice(0, -1).map(msg => ({ role: msg.role, content: msg.content })),
+      { role: 'user', content: message + contextText }
     ];
 
-    console.log('🤖 Streaming response from Groq...');
-
+    // ─── Stream from Groq ──────────────────────────────────────────────────
     const completion = await groq.chat.completions.create({
       messages,
       model: 'llama-3.3-70b-versatile',
-      temperature: 0.7,
-      max_tokens: 2048,
+      temperature: 0.2,
+      max_tokens: 3000,  // increased for Mermaid diagrams
       stream: true
     });
 
     let fullResponse = '';
-
     for await (const chunk of completion) {
       const content = chunk.choices[0]?.delta?.content || '';
       if (content) {
         fullResponse += content;
-        res.write(`data: ${JSON.stringify({
-          type: 'token',
-          content
-        })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'token', content })}\n\n`);
         res.flush?.();
       }
     }
 
-    console.log('✅ Streaming complete');
+    // ─── Find images ───────────────────────────────────────────────────────
+    const images = await findImagesForResponse(fullResponse, relevantChunks, documentIds);
 
-    // Save assistant message with metadata
+    // ─── Save ──────────────────────────────────────────────────────────────
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
         role: 'assistant',
         content: fullResponse,
-        images: images.length > 0 ? JSON.stringify(images) : null,
-        metadata: webResults.length > 0 ? {
-          webSearchUsed: true,
-          webResultsCount: webResults.length
-        } : null
+        images: images.length > 0 ? images : null
       }
     });
 
@@ -233,12 +280,7 @@ Integrate citations naturally.`;
 
   } catch (error) {
     console.error('❌ SSE stream error:', error);
-
-    res.write(`data: ${JSON.stringify({
-      type: 'error',
-      error: error.message
-    })}\n\n`);
-
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
     res.end();
   }
 };
