@@ -1,172 +1,135 @@
 // backend/src/services/python-client.service.js
-// Client for Python FastAPI microservice
+'use strict';
 
 const axios = require('axios');
 
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8000';
-const REQUEST_TIMEOUT = 300000; // 5 minutes
 
-/**
- * Python Client Service
- * Connects Node.js backend to Python FastAPI microservice
- */
+const TIMEOUT = {
+  HEALTH:     5_000,
+  PDF_TEXT:   300_000,   // 5 min
+  IMAGES:     900_000,   // 15 min
+  OCR:        120_000,   // 2 min per batch
+  EMBEDDINGS: 900_000,   // 15 min
+};
+
 class PythonClientService {
   constructor() {
     this.baseURL = PYTHON_SERVICE_URL;
-    console.log(`[PythonClient] Initialized with URL: ${this.baseURL}`);
+    console.log(`[PythonClient] Initialized: ${this.baseURL}`);
   }
 
-  /**
-   * Check Python service health
-   */
   async healthCheck() {
-    try {
-      const response = await axios.get(`${this.baseURL}/health`, {
-        timeout: 5000
-      });
-      return response.data;
-    } catch (error) {
-      console.error('[PythonClient] Health check failed:', error.message);
-      throw new Error('Python service unavailable');
-    }
+    const response = await axios.get(`${this.baseURL}/health`, { timeout: TIMEOUT.HEALTH });
+    return response.data;
   }
 
-  /**
-   * Process PDF - Extract text and metadata
-   * @param {string} documentId - Document ID
-   * @param {string} pdfPath - Path to PDF file
-   * @returns {Promise<Object>} - Processing results
-   */
   async processPDF(documentId, pdfPath) {
     try {
-      console.log('[PythonClient] Processing PDF:', { documentId, pdfPath });
-
       const response = await axios.post(
         `${this.baseURL}/api/pdf/process`,
-        {
-          document_id: documentId,
-          pdf_path: pdfPath
-        },
-        {
-          timeout: REQUEST_TIMEOUT,
-          headers: { 'Content-Type': 'application/json' }
-        }
+        { document_id: documentId, pdf_path: pdfPath },
+        { timeout: TIMEOUT.PDF_TEXT, headers: { 'Content-Type': 'application/json' } }
       );
-
-      if (!response.data.success) {
-        throw new Error('PDF processing failed');
-      }
-
-      console.log('[PythonClient] PDF processed successfully');
+      if (!response.data.success) throw new Error('PDF processing returned failure');
       return response.data.data;
-
     } catch (error) {
-      console.error('[PythonClient] PDF processing failed:', error.message);
       throw new Error(`Python PDF processing failed: ${error.message}`);
     }
   }
 
-  /**
-   * Extract images from PDF
-   * @param {string} documentId - Document ID
-   * @param {string} pdfPath - Path to PDF file
-   * @returns {Promise<Array>} - Extracted images
-   */
   async extractImages(documentId, pdfPath) {
     try {
-      console.log('[PythonClient] Extracting images:', { documentId, pdfPath });
-
       const response = await axios.post(
         `${this.baseURL}/api/pdf/extract-images`,
-        {
-          document_id: documentId,
-          pdf_path: pdfPath
-        },
-        {
-          timeout: REQUEST_TIMEOUT,
-          headers: { 'Content-Type': 'application/json' }
-        }
+        { document_id: documentId, pdf_path: pdfPath },
+        { timeout: TIMEOUT.IMAGES, headers: { 'Content-Type': 'application/json' }, maxContentLength: Infinity, maxBodyLength: Infinity }
       );
-
-      if (!response.data.success) {
-        throw new Error('Image extraction failed');
-      }
-
-      console.log('[PythonClient] Images extracted:', response.data.data.count);
+      if (!response.data.success) throw new Error('Image extraction returned failure');
+      console.log(`[PythonClient] Images extracted: ${response.data.data.count}`);
       return response.data.data.images;
-
     } catch (error) {
-      console.error('[PythonClient] Image extraction failed:', error.message);
       throw new Error(`Python image extraction failed: ${error.message}`);
     }
   }
 
   /**
-   * Perform OCR on image
-   * @param {string} imagePath - Path to image file
-   * @param {string} documentId - Document ID
-   * @param {number} pageNumber - Page number
-   * @param {number} imageIndex - Image index
-   * @returns {Promise<Object>} - OCR result
+   * OCR a single image — kept for compatibility but prefer performOCRBatch
    */
   async performOCR(imagePath, documentId, pageNumber, imageIndex) {
     try {
-      console.log('[PythonClient] Performing OCR:', { imagePath, pageNumber, imageIndex });
-
       const response = await axios.post(
         `${this.baseURL}/api/ocr/process`,
-        {
-          image_path: imagePath,
-          document_id: documentId,
-          page_number: pageNumber,
-          image_index: imageIndex
-        },
-        {
-          timeout: REQUEST_TIMEOUT,
-          headers: { 'Content-Type': 'application/json' }
-        }
+        { image_path: imagePath, document_id: documentId, page_number: pageNumber, image_index: imageIndex },
+        { timeout: TIMEOUT.OCR, headers: { 'Content-Type': 'application/json' } }
       );
-
-      if (!response.data.success) {
-        throw new Error('OCR processing failed');
-      }
-
-      console.log('[PythonClient] OCR completed');
-      // Python returns {success: true, text: "...", confidence: ...} directly
+      if (!response.data.success) throw new Error('OCR returned failure');
       return response.data;
-
     } catch (error) {
-      console.error('[PythonClient] OCR failed:', error.message);
       throw new Error(`Python OCR failed: ${error.message}`);
     }
   }
 
   /**
-   * Generate embeddings for text
-   * @param {Array<string>} texts - Array of text chunks
-   * @returns {Promise<Array>} - Embeddings
+   * BATCH OCR — send up to 20 images at once to Python's /process-batch endpoint.
+   * This is the fast path used by _runOCROnImages.
+   *
+   * @param {Array<{id: string, path: string}>} images
+   * @returns {Promise<Array<{id, status, text, confidence}>>}
+   */
+  async performOCRBatch(images) {
+    try {
+      console.log(`[PythonClient] OCR batch: ${images.length} images`);
+
+      const response = await axios.post(
+        `${this.baseURL}/api/ocr/process-batch`,
+        { images },
+        { timeout: TIMEOUT.OCR, headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const results = response.data?.data?.results || [];
+      console.log(`[PythonClient] OCR batch done: ${results.filter(r => r.status === 'completed').length}/${results.length} succeeded`);
+      return results;
+
+    } catch (error) {
+      console.error('[PythonClient] OCR batch failed:', error.message);
+      // Return all as failed so caller can continue
+      return images.map(img => ({ id: img.id, status: 'failed', text: '', confidence: 0 }));
+    }
+  }
+
+  /**
+   * Generate embeddings in batches of 500 — never times out regardless of doc size.
    */
   async generateEmbeddings(texts) {
-    try {
-      console.log('[PythonClient] Generating embeddings:', texts.length);
+    if (!texts?.length) return [];
+
+    const CHUNK = 500;
+    const all = [];
+    const total = Math.ceil(texts.length / CHUNK);
+
+    console.log(`[PythonClient] Generating embeddings: ${texts.length} texts in ${total} batches`);
+
+    for (let i = 0; i < texts.length; i += CHUNK) {
+      const batch = texts.slice(i, i + CHUNK);
+      const batchNum = Math.floor(i / CHUNK) + 1;
+      console.log(`[PythonClient] Embedding batch ${batchNum}/${total} (${batch.length} texts)`);
 
       const response = await axios.post(
         `${this.baseURL}/api/embeddings/generate`,
-        texts, // Send as array directly
-        {
-          timeout: REQUEST_TIMEOUT,
-          headers: { 'Content-Type': 'application/json' }
-        }
+        batch,
+        { timeout: TIMEOUT.EMBEDDINGS, headers: { 'Content-Type': 'application/json' } }
       );
 
-      // Python returns array directly: [embedding1, embedding2, ...]
-      console.log('[PythonClient] Embeddings generated');
-      return response.data;
+      const vectors = Array.isArray(response.data) ? response.data : response.data?.data?.embeddings;
+      if (!vectors?.length) throw new Error(`Bad embedding response in batch ${batchNum}`);
 
-    } catch (error) {
-      console.error('[PythonClient] Embedding generation failed:', error.message);
-      throw new Error(`Python embedding generation failed: ${error.message}`);
+      all.push(...vectors);
+      console.log(`[PythonClient] Batch ${batchNum}/${total} done — ${all.length}/${texts.length} total`);
     }
+
+    console.log(`[PythonClient] All embeddings done: ${all.length} vectors`);
+    return all;
   }
 }
 
