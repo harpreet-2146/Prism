@@ -26,6 +26,7 @@ model User {
 model Document {
   id              String          @id @default(uuid())
   userId          String          @map("user_id")
+  indexData       Json?
   filename        String
   originalName    String          @map("original_name")
   fileSize        Int             @map("file_size")
