@@ -1,96 +1,165 @@
-import { useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { useChat } from '@hooks/useChat';
-import ChatMessage from '@components/chat/ChatMessage';
-import ChatInput from '@components/chat/ChatInput';
-import { Skeleton } from '@components/ui/skeleton';
-import { WELCOME_MESSAGE } from '@lib/constants';
-import { MessageSquare } from 'lucide-react';
+// frontend/src/pages/Chat.jsx
+import { useEffect, useRef, useState } from 'react';
+import { useParams, useSearchParams, Link } from 'react-router-dom';
+import { useChat } from '@/hooks/useChat';
+import ChatMessage from '@/components/chat/ChatMessage';
+import ChatInput from '@/components/chat/ChatInput';
+import { FileText, Layers, ChevronDown } from 'lucide-react';
 
+// ── Suggestions for empty state ───────────────────────────────────────────────
+const SUGGESTIONS = [
+  { emoji: '📘', label: 'Full POSC overview', query: 'Give me a comprehensive overview of everything in my documents related to POSC — all steps, configurations, T-codes, and important notes.' },
+  { emoji: '⚙️', label: 'All T-codes explained', query: 'List and explain every SAP T-code mentioned in my uploaded documents with their purpose and when to use each.' },
+  { emoji: '🔍', label: 'Document index', query: 'Generate a detailed index of all the topics, sections, and concepts covered in my uploaded documents.' },
+  { emoji: '🛠️', label: 'Error resolution guide', query: 'What error scenarios and their resolutions are documented in my uploaded SAP documents? Give me everything.' },
+];
+
+// ── Empty/welcome state ───────────────────────────────────────────────────────
+function EmptyState({ onSuggestion }) {
+  return (
+    <div className="flex flex-col items-center justify-center min-h-full py-20 px-6">
+      {/* Wordmark */}
+      <div className="mb-10 flex flex-col items-center gap-3">
+        <div className="relative">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-sky-500 via-blue-600 to-blue-800 flex items-center justify-center shadow-xl shadow-sky-900/40">
+            <span className="text-3xl font-bold text-white tracking-tighter">P</span>
+          </div>
+          {/* Prism refraction lines */}
+          <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 flex gap-[3px]">
+            {['bg-sky-400','bg-blue-400','bg-violet-400'].map((c, i) => (
+              <div key={i} className={`w-1 h-2 rounded-full ${c} opacity-80`} />
+            ))}
+          </div>
+        </div>
+        <div className="text-center mt-2">
+          <h1 className="text-2xl font-semibold text-white tracking-tight">PRISM</h1>
+          <p className="text-sm text-slate-500 mt-0.5">SAP Documentation Assistant</p>
+        </div>
+      </div>
+
+      <p className="text-slate-400 text-[0.9375rem] text-center max-w-md mb-8 leading-relaxed">
+        Ask anything about your uploaded SAP documentation. PRISM reads the full document context — not just snippets.
+      </p>
+
+      {/* Suggestion grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full max-w-xl">
+        {SUGGESTIONS.map((s, i) => (
+          <button
+            key={i}
+            onClick={() => onSuggestion(s.query)}
+            className="group flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-800/60 hover:border-slate-700 px-4 py-3.5 text-left transition-all duration-150"
+          >
+            <span className="text-lg flex-shrink-0 group-hover:scale-110 transition-transform mt-0.5">
+              {s.emoji}
+            </span>
+            <span className="text-sm text-slate-400 group-hover:text-slate-200 leading-snug transition-colors">
+              {s.label}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* Doc nudge */}
+      <div className="mt-8 flex items-center gap-2.5 rounded-xl bg-sky-950/40 border border-sky-900/50 px-4 py-3 text-sm text-sky-400/80">
+        <FileText className="h-4 w-4 flex-shrink-0 text-sky-500" />
+        <span>
+          Upload SAP PDFs first for contextual answers.{' '}
+          <Link to="/documents" className="text-sky-400 font-medium hover:underline underline-offset-2">
+            Go to Documents →
+          </Link>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Scroll-to-bottom button ───────────────────────────────────────────────────
+function ScrollButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="absolute bottom-4 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white hover:bg-slate-700 transition-all shadow-lg"
+    >
+      <ChevronDown className="h-4 w-4" />
+    </button>
+  );
+}
+
+// ── Main Chat page ────────────────────────────────────────────────────────────
 export default function Chat() {
   const { conversationId } = useParams();
-  const navigate = useNavigate();
-  const { messages, loading, fetchConversation, setMessages, setCurrentConversation } = useChat();
-  const messagesEndRef = useRef(null);
-  const isInitialLoad = useRef(true);
+  const [searchParams] = useSearchParams();
+  const { messages, loading, streaming, fetchConversation, setMessages, setCurrentConversation, sendStreamingMessage } = useChat();
 
-  // Auto-scroll to bottom when new messages arrive
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const scrollRef = useRef(null);
+  const endRef = useRef(null);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const prevConvIdRef = useRef(null);
 
+  // Load conversation
   useEffect(() => {
-    scrollToBottom();
+    if (conversationId === prevConvIdRef.current) return;
+    prevConvIdRef.current = conversationId;
+    if (conversationId) {
+      fetchConversation(conversationId);
+    } else {
+      setCurrentConversation(null);
+      setMessages([]);
+    }
+  }, [conversationId]);
+
+  // Handle ?q= pre-fill from DocumentIndex "Ask about this" clicks
+  useEffect(() => {
+    const q = searchParams.get('q');
+    if (q && messages.length === 0 && !conversationId) {
+      sendStreamingMessage(q, null);
+    }
+  }, []);
+
+  // Auto-scroll on new messages
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: messages.length <= 2 ? 'auto' : 'smooth' });
   }, [messages]);
 
-  // Load conversation when ID changes
-  useEffect(() => {
-    const loadConversation = async () => {
-      if (conversationId) {
-        // Load existing conversation
-        await fetchConversation(conversationId);
-      } else {
-        // New conversation - clear state
-        setCurrentConversation(null);
-        setMessages([]);
-      }
-      isInitialLoad.current = false;
-    };
+  // Show scroll button if user scrolled up
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBtn(distFromBottom > 300);
+  };
 
-    loadConversation();
-  }, [conversationId, fetchConversation, setMessages, setCurrentConversation]);
+  const scrollToBottom = () => endRef.current?.scrollIntoView({ behavior: 'smooth' });
 
-  // Show loading skeleton only on initial load
-  if (isInitialLoad.current && loading) {
-    return (
-      <div className="flex h-full flex-col">
-        <div className="flex-1 space-y-4 overflow-y-auto p-4">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="flex gap-4">
-              <Skeleton className="h-10 w-10 shrink-0 rounded-full" />
-              <div className="flex-1 space-y-2">
-                <Skeleton className="h-4 w-[200px]" />
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-[80%]" />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const handleSuggestion = (query) => sendStreamingMessage(query, conversationId);
 
   return (
-    <div className="flex h-full flex-col bg-background">
-      {/* Messages area */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        <div className="mx-auto max-w-4xl px-4 py-8">
-          {messages.length === 0 ? (
-            // Welcome message
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
-                <MessageSquare className="h-8 w-8 text-primary" />
-              </div>
-              <h2 className="mb-4 text-2xl font-bold">Welcome to PRISM</h2>
-              <div className="prose prose-sm max-w-2xl text-muted-foreground">
-                <p className="whitespace-pre-line">{WELCOME_MESSAGE}</p>
-              </div>
-            </div>
-          ) : (
-            // Chat messages
-            <div className="space-y-6">
-              {messages.map((message) => (
-                <ChatMessage key={message.id} message={message} />
-              ))}
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
+    <div className="flex flex-col h-full bg-slate-950">
+      {/* ── Message area ──────────────────────────────────────────────────── */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="relative flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent"
+      >
+        {messages.length === 0 ? (
+          <div className="max-w-3xl mx-auto w-full h-full">
+            <EmptyState onSuggestion={handleSuggestion} />
+          </div>
+        ) : (
+          <div className="max-w-3xl mx-auto w-full py-8 flex flex-col gap-7">
+            {messages.map(msg => (
+              <ChatMessage key={msg.id || msg.tempId} message={msg} />
+            ))}
+            <div ref={endRef} className="h-2" />
+          </div>
+        )}
+
+        {showScrollBtn && <ScrollButton onClick={scrollToBottom} />}
       </div>
 
-      {/* Input area */}
-      <div className="border-t bg-card">
-        <div className="mx-auto max-w-4xl px-4 py-4">
+      {/* ── Input area ────────────────────────────────────────────────────── */}
+      <div className="border-t border-slate-800/80 bg-slate-950">
+        <div className="max-w-3xl mx-auto w-full px-4 pt-4 pb-5">
           <ChatInput />
         </div>
       </div>

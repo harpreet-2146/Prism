@@ -1,92 +1,122 @@
-import { useState, useRef } from 'react';
-import { useParams } from 'react-router-dom';
-import { useChat } from '@hooks/useChat';
-import { Button } from '@components/ui/button';
-import { Textarea } from '@components/ui/textarea';
-import { Send, Loader2 } from 'lucide-react';
+// frontend/src/components/chat/ChatInput.jsx
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useChat } from '@/hooks/useChat';
+import { ArrowUp, Square, Paperclip } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-export default function ChatInput() {
+export default function ChatInput({ className }) {
   const { conversationId } = useParams();
-  const { sendStreamingMessage, streaming } = useChat();
-  const [input, setInput] = useState('');
-  const textareaRef = useRef(null);
+  const navigate = useNavigate();
+  const { sendStreamingMessage, streaming, stopStreaming } = useChat();
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const [value, setValue] = useState('');
+  const taRef = useRef(null);
 
-    if (!input.trim() || streaming) return;
+  // Auto-resize
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 240) + 'px';
+  }, [value]);
 
-    const message = input.trim();
-    
-    // Clear input immediately
-    setInput('');
-    
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+  const submit = useCallback(async () => {
+    const text = value.trim();
+    if (!text || streaming) return;
+    setValue('');
+
+    // If no conversationId, sendStreamingMessage will create one and redirect
+    const newConvId = await sendStreamingMessage(text, conversationId);
+    if (newConvId && !conversationId) {
+      navigate(`/chat/${newConvId}`);
     }
+  }, [value, streaming, conversationId, sendStreamingMessage, navigate]);
 
-    try {
-      await sendStreamingMessage(message, conversationId);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      // Show error toast or notification here if needed
-    }
-  };
-
-  const handleKeyDown = (e) => {
+  const onKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit(e);
+      submit();
     }
   };
 
-  // Auto-resize textarea
-  const handleInput = (e) => {
-    setInput(e.target.value);
-    
-    // Reset height to recalculate
-    e.target.style.height = 'auto';
-    // Set height based on scrollHeight (max 200px)
-    e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
-  };
+  const canSend = value.trim().length > 0;
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-3">
-      {/* Input form */}
-      <div className="flex gap-3">
-        <Textarea
-          ref={textareaRef}
-          value={input}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask about your SAP documentation..."
-          className="min-h-[60px] max-h-[200px] resize-none"
-          disabled={streaming}
+    <div className={cn('relative', className)}>
+      {/* Main input container */}
+      <div className={cn(
+        'flex items-end gap-3 rounded-2xl border transition-all duration-150',
+        'bg-slate-900 border-slate-700/70',
+        'focus-within:border-sky-500/50 focus-within:shadow-lg focus-within:shadow-sky-900/20',
+        streaming && 'border-sky-600/40 shadow-md shadow-sky-900/10'
+      )}>
+        {/* Textarea */}
+        <textarea
+          ref={taRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          disabled={false} // allow typing while streaming (queue)
+          placeholder={streaming ? '' : 'Ask anything about your SAP documents…'}
           rows={1}
+          className={cn(
+            'flex-1 resize-none bg-transparent px-5 py-4 text-[0.9375rem] leading-[1.7]',
+            'text-slate-100 placeholder:text-slate-600',
+            'focus:outline-none min-h-[56px] max-h-[240px]',
+            'scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent'
+          )}
         />
 
-        {/* Send button */}
-        <Button 
-          type="submit" 
-          disabled={!input.trim() || streaming} 
-          size="icon" 
-          className="h-[60px] w-[60px] shrink-0"
-        >
-          {streaming ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <Send className="h-5 w-5" />
-          )}
-        </Button>
+        {/* Action buttons */}
+        <div className="flex items-end gap-1 pb-3 pr-3">
+          {/* Stop / Send */}
+          <button
+            onClick={streaming ? stopStreaming : submit}
+            disabled={!streaming && !canSend}
+            className={cn(
+              'flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-150',
+              streaming
+                ? 'bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white'
+                : canSend
+                  ? 'bg-sky-600 text-white hover:bg-sky-500 shadow-md shadow-sky-900/40 active:scale-95'
+                  : 'bg-slate-800 text-slate-600 cursor-not-allowed'
+            )}
+          >
+            {streaming ? (
+              <Square className="h-3.5 w-3.5 fill-current" />
+            ) : (
+              <ArrowUp className="h-4 w-4" />
+            )}
+          </button>
+        </div>
       </div>
 
-      {/* Helper text */}
-      <p className="text-xs text-muted-foreground">
-        {streaming 
-          ? 'AI is responding...' 
-          : 'Press Enter to send, Shift+Enter for new line'}
-      </p>
-    </form>
+      {/* Streaming indicator */}
+      {streaming && (
+        <div className="absolute left-5 top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none">
+          <div className="flex gap-1">
+            {[0, 1, 2].map(i => (
+              <div
+                key={i}
+                className="w-1 h-1 rounded-full bg-sky-500 animate-bounce"
+                style={{ animationDelay: `${i * 120}ms` }}
+              />
+            ))}
+          </div>
+          <span className="text-xs text-sky-500/80 font-mono">PRISM is writing</span>
+        </div>
+      )}
+
+      {/* Hint */}
+      <div className="flex items-center justify-between mt-2 px-1">
+        <p className="text-[11px] text-slate-600">
+          <kbd className="font-mono">Enter</kbd> to send · <kbd className="font-mono">Shift+Enter</kbd> for new line
+        </p>
+        <p className="text-[11px] text-slate-600">
+          {value.length > 0 && `${value.length} chars`}
+        </p>
+      </div>
+    </div>
   );
 }
