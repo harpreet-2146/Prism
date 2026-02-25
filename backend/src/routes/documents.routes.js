@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
+const { generateIndexHandler } = require('../controllers/documents-index.controller');
 const { authenticate } = require('../middleware/auth.middleware');
 const documentsController = require('../controllers/documents.controller');
 
@@ -75,6 +76,8 @@ router.delete('/:id', authenticate, (req, res) => {
 router.get('/:documentId/images/:filename', authenticate, (req, res) => {
   documentsController.serveImage(req, res);
 });
+
+router.post('/:id/generate-index', authMiddleware, generateIndexHandler);
 
 // ================================================================
 // ERROR HANDLING
