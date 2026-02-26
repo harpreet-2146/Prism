@@ -1,32 +1,25 @@
 // backend/src/routes/export.routes.js
+// Handles conversation export to PDF and DOCX
+//
+// Routes:
+//   GET /api/export/conversation/:id/pdf   → download PDF
+//   GET /api/export/conversation/:id/docx  → download DOCX (future)
+//
+// Usage in app.js / index.js:
+//   const exportRoutes = require('./routes/export.routes');
+//   app.use('/api/export', exportRoutes);
+
 'use strict';
 
 const express = require('express');
 const router = express.Router();
-
-console.log('  → Loading export controller...');
-const exportController = require('../controllers/export.controller');
-
-console.log('  → Loading auth middleware...');
+const { exportConversationPDF } = require('../controllers/export-pdf.controller');
 const { authenticate } = require('../middleware/auth.middleware');
 
-console.log('  → Setting up export routes...');
+// GET /api/export/conversation/:id/pdf
+router.get('/conversation/:id/pdf', authenticate, exportConversationPDF);
 
-// Export conversation as PDF (POST with conversationId in body)
-router.post('/pdf', authenticate, (req, res) => {
-  exportController.exportPDF(req, res);
-});
-
-// Export conversation as DOCX (POST with conversationId in body)
-router.post('/docx', authenticate, (req, res) => {
-  exportController.exportDOCX(req, res);
-});
-
-// Download exported file
-router.get('/download/:filename', (req, res) => {
-  exportController.download(req, res);
-});
-
-console.log('  → Export routes configured');
+// Placeholder for DOCX export — add controller later
+// router.get('/conversation/:id/docx', authMiddleware, exportConversationDOCX);
 
 module.exports = router;
