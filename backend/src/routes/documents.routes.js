@@ -77,7 +77,7 @@ router.get('/:documentId/images/:filename', authenticate, (req, res) => {
   documentsController.serveImage(req, res);
 });
 
-router.post('/:id/generate-index', authMiddleware, generateIndexHandler);
+router.post('/:id/generate-index', authenticate, generateIndexHandler);
 
 // ================================================================
 // ERROR HANDLING
