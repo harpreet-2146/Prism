@@ -12,11 +12,11 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const BASE_URL       = process.env.BASE_URL            || 'http://localhost:5000';
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 const GROQ_MODEL     = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
-const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '8000', 10);
+const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '9000', 10);
 const GROQ_TEMP      = parseFloat(process.env.GROQ_TEMPERATURE || '0.3');
-const GROQ_CONTINUATION_MAX_TOKENS = parseInt(process.env.GROQ_CONTINUATION_MAX_TOKENS || '4000', 10);
-const ARTICLE_MIN_STEPS = parseInt(process.env.ARTICLE_MIN_STEPS || '12', 10);
-const ARTICLE_MIN_WORDS = parseInt(process.env.ARTICLE_MIN_WORDS || '1400', 10);
+const GROQ_CONTINUATION_MAX_TOKENS = parseInt(process.env.GROQ_CONTINUATION_MAX_TOKENS || '6000', 10);
+const ARTICLE_MIN_STEPS = parseInt(process.env.ARTICLE_MIN_STEPS || '14', 10);
+const ARTICLE_MIN_WORDS = parseInt(process.env.ARTICLE_MIN_WORDS || '2200', 10);
 const TAVILY_DEPTH   = process.env.TAVILY_SEARCH_DEPTH  || 'advanced';
 const TAVILY_MAX     = parseInt(process.env.TAVILY_MAX_RESULTS || '3', 10);
 const EMBED_TOP_K    = 20; // Retrieve more chunks — POSC spans many pages
@@ -142,6 +142,7 @@ function buildTopicGuard(userMessage, chunks = []) {
 - Do NOT default to POSC or EWM unless the user/context explicitly asks for it.
 - If user asks about another document/topic, stay on that topic only.
 - If module terms conflict, prioritize the most relevant retrieved chunks.
+- Avoid generic phrasing like "configure as needed", "follow best practices", or "etc.".
 ${moduleHint}`;
 }
 
@@ -167,6 +168,19 @@ Result:
 
 Watch Out:
 [ONE specific, real mistake that happens here. Not generic "save your work". Something actually specific to this configuration step.]
+
+Do NOT add "Note", "Disclaimer", "Important", or legal/safety disclaimer sections anywhere in the response.
+
+SYSTEM-ORIENTED EXECUTION MODE:
+- Treat this like a production runbook for a consultant who is actively clicking through SAP screens.
+- Every Action block must include concrete UI operations:
+  1) exact app/menu/t-code entry,
+  2) exact field labels,
+  3) exact values to type/select,
+  4) exact button/action to click.
+- Do not write generic instructions such as "configure the settings", "fill required fields", or "proceed accordingly".
+- If using inferred details beyond source text, still provide concrete values/examples and mark source ref lines where available.
+- For each step, include a verifiable Result (status message/screen/table change) that proves completion.
 
 ═══════════════════════════════════════════════════════
 MERMAID — DECISION FLOWS ONLY
