@@ -13,7 +13,7 @@ const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MODEL = 'llama-3.3-70b-versatile';
-const GROQ_CONTEXT_LIMIT = 100_000; // chars — Groq's effective limit
+const GROQ_CONTEXT_LIMIT = 30_000; // chars — keeps token usage under Groq free tier (12k TPM)
 
 // Truncate text but preserve structure (don't cut mid-sentence)
 function safeSlice(text, maxChars) {
