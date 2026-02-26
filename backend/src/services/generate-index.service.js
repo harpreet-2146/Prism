@@ -5,7 +5,6 @@
 // Groq analysis, and produces a rich JSON index with sections, T-codes,
 // concepts, warnings, and integration points.
 
-const { PrismaClient } = require('@prisma/client');
 const Groq = require('groq-sdk');
 
 const prisma = require('../utils/prisma'); // use singleton
@@ -14,6 +13,7 @@ const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MODEL = 'llama-3.3-70b-versatile';
 const GROQ_CONTEXT_LIMIT = 30_000; // chars — keeps token usage under Groq free tier (12k TPM)
+const CONTEXT_RETRY_LIMITS = [30_000, 18_000, 10_000];
 
 // Truncate text but preserve structure (don't cut mid-sentence)
 function safeSlice(text, maxChars) {
@@ -23,29 +23,38 @@ function safeSlice(text, maxChars) {
   return lastPeriod > maxChars * 0.8 ? truncated.slice(0, lastPeriod + 1) : truncated;
 }
 
-// ─── Main export ──────────────────────────────────────────────────────────────
-async function generateDocumentIndex(documentId, userId) {
-  // 1. Load document — must belong to user
-  const doc = await prisma.document.findFirst({
-    where: { id: documentId, userId },
-    select: {
-      id: true,
-      originalName: true,
-      pageCount: true,
-      sapModule: true,
-      tcodes: true,
-      textContent: true,    // full extracted text stored post-processing
-      status: true,
-    },
-  });
+function extractJsonObject(raw) {
+  if (!raw || typeof raw !== 'string') {
+    throw new Error('Empty response from Groq');
+  }
 
-  if (!doc) throw new Error('Document not found');
-  if (doc.status !== 'completed') throw new Error('Document has not finished processing');
-  if (!doc.textContent) throw new Error('No text content available for this document');
+  const trimmed = raw.trim();
+  const noFence = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
 
-  const fullText = safeSlice(doc.textContent, GROQ_CONTEXT_LIMIT);
+  try {
+    return JSON.parse(noFence);
+  } catch (_) {
+    // Continue with defensive extraction.
+  }
 
-  // 2. First pass — structural analysis + T-code extraction
+  const start = noFence.indexOf('{');
+  const end = noFence.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('Groq response did not contain a JSON object');
+  }
+
+  const candidate = noFence.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch (err) {
+    throw new Error(`Failed to parse index JSON: ${err.message}`);
+  }
+}
+
+async function requestIndexFromGroq(doc, text, maxTokens = 3200) {
   const structuralPrompt = `You are an expert SAP technical documentation analyst. Analyze this SAP documentation and produce a comprehensive structural index.
 
 Document: "${doc.originalName}"
@@ -54,7 +63,7 @@ Known SAP module: ${doc.sapModule || 'to be determined'}
 
 FULL DOCUMENT TEXT:
 ---
-${fullText}
+${text}
 ---
 
 Return ONLY a valid JSON object (no markdown, no backticks) with this exact structure:
@@ -90,30 +99,59 @@ Rules:
 - Warnings should be real gotchas from the text, not generic advice
 - If the doc is short or simple, fewer sections is fine — don't invent content`;
 
+  const response = await groqClient.chat.completions.create({
+    model: MODEL,
+    max_tokens: maxTokens,
+    temperature: 0.1,
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a precise SAP documentation analyst. Return only valid JSON, nothing else. No markdown, no explanation, no backticks.',
+      },
+      { role: 'user', content: structuralPrompt },
+    ],
+  });
+
+  const raw = response.choices[0]?.message?.content;
+  return extractJsonObject(raw);
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+async function generateDocumentIndex(documentId, userId) {
+  // 1. Load document — must belong to user
+  const doc = await prisma.document.findFirst({
+    where: { id: documentId, userId },
+    select: {
+      id: true,
+      originalName: true,
+      pageCount: true,
+      sapModule: true,
+      tcodes: true,
+      textContent: true,    // full extracted text stored post-processing
+      status: true,
+    },
+  });
+
+  if (!doc) throw new Error('Document not found');
+  if (doc.status !== 'completed') throw new Error('Document has not finished processing');
+  if (!doc.textContent) throw new Error('No text content available for this document');
+
+  const fullText = safeSlice(doc.textContent, GROQ_CONTEXT_LIMIT);
+
+  // 2. Structural analysis + T-code extraction with retries
   let rawIndex;
-  try {
-    const response = await groqClient.chat.completions.create({
-      model: MODEL,
-      max_tokens: 4000,
-      temperature: 0.1, // low temp for consistent structured output
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a precise SAP documentation analyst. Return only valid JSON, nothing else. No markdown, no explanation, no backticks.',
-        },
-        { role: 'user', content: structuralPrompt },
-      ],
-    });
+  for (const limit of CONTEXT_RETRY_LIMITS) {
+    try {
+      const candidateText = safeSlice(fullText, limit);
+      rawIndex = await requestIndexFromGroq(doc, candidateText);
+      break;
+    } catch (err) {
+      console.error(`[generate-index] attempt failed (chars=${limit}):`, err.message);
+    }
+  }
 
-    const raw = response.choices[0]?.message?.content?.trim();
-    if (!raw) throw new Error('Empty response from Groq');
-
-    // Strip any accidental markdown fences
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    rawIndex = JSON.parse(cleaned);
-  } catch (err) {
-    console.error('[generate-index] Groq or parse error:', err.message);
-    // Build minimal fallback from known metadata
+  if (!rawIndex) {
+    console.error('[generate-index] all Groq attempts failed, storing basic fallback index');
     rawIndex = buildFallbackIndex(doc);
   }
 
@@ -138,7 +176,7 @@ Rules:
 function buildFallbackIndex(doc) {
   return {
     sapModule: doc.sapModule || 'SAP',
-    overview: `${doc.originalName} — ${doc.pageCount || 0} page SAP documentation. Generate index to see full content breakdown.`,
+    overview: `${doc.originalName} — ${doc.pageCount || 0} page SAP documentation.`,
     stats: { Pages: doc.pageCount || 0, 'T-Codes': doc.tcodes?.length || 0, Sections: 0 },
     allTcodes: doc.tcodes || [],
     integrations: [],
@@ -146,7 +184,7 @@ function buildFallbackIndex(doc) {
       {
         icon: '📄',
         title: 'Document Content',
-        summary: 'Content index generation failed. Try regenerating.',
+        summary: 'Basic index created. Regenerate to produce a richer section map.',
         pages: null,
         tcodes: doc.tcodes || [],
         concepts: [],
