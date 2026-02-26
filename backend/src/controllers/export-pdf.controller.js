@@ -21,10 +21,15 @@ function sanitizeMermaid(code) {
 function parseMessageImages(images) {
   if (!images) return [];
   if (Array.isArray(images)) return images.filter((i) => i?.url);
+  if (typeof images === 'object' && Array.isArray(images.images)) {
+    return images.images.filter((i) => i?.url);
+  }
   if (typeof images === 'string') {
     try {
       const parsed = JSON.parse(images);
-      return Array.isArray(parsed) ? parsed.filter((i) => i?.url) : [];
+      if (Array.isArray(parsed)) return parsed.filter((i) => i?.url);
+      if (parsed && Array.isArray(parsed.images)) return parsed.images.filter((i) => i?.url);
+      return [];
     } catch (_) {
       return [];
     }
@@ -35,7 +40,7 @@ function parseMessageImages(images) {
 function renderImageGallery(images) {
   if (!images.length) return '';
   const items = images
-    .slice(0, 8)
+    .slice(0, 30)
     .map((img) => `
       <figure class="shot">
         <img src="${escapeHtml(img.url)}" alt="Document screenshot page ${escapeHtml(img.pageNumber)}" />
