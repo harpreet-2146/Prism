@@ -349,14 +349,10 @@ class AuthService {
     }
   );
 
-  // 🔍 DEBUG: Log token details
-  logger.info('✅ Tokens generated', {
+  logger.info('Tokens generated', {
     userId,
     accessTokenLength: accessToken.length,
     refreshTokenLength: refreshToken.length,
-    accessTokenPreview: accessToken.substring(0, 50) + '...',
-    JWT_SECRET_length: config.JWT_SECRET?.length,
-    JWT_REFRESH_SECRET_length: config.JWT_REFRESH_SECRET?.length,
     component: 'auth-service'
   });
 
