@@ -12,10 +12,17 @@ function MermaidDiagram({ chart }) {
   const id = useRef(`mmd-${Math.random().toString(36).slice(2)}`);
   useEffect(() => {
     let dead = false;
+    const normalize = (input) => String(input || '')
+      .trim()
+      .replace(/\|([^|]*)\|>/g, '|$1|')
+      .replace(/-->/g, ' --> ')
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'");
     import('mermaid').then(m => {
       const mermaid = m.default;
       mermaid.initialize({
         startOnLoad: false, theme: 'base',
+        securityLevel: 'loose',
         themeVariables: {
           primaryColor: '#1e40af', primaryTextColor: '#fff',
           primaryBorderColor: '#93c5fd', lineColor: '#64748b',
@@ -24,16 +31,18 @@ function MermaidDiagram({ chart }) {
         flowchart: { curve: 'linear', padding: 20, nodeSpacing: 50, rankSpacing: 40 }
       });
       // Auto-fix common invalid syntax: -->|label|> → -->|label|
-      const fixedChart = chart.trim()
-        .replace(/\|([^|]*)\|>/g, '|$1|')
-        .replace(/-->/g, ' --> '); // ensure spacing
+      const fixedChart = normalize(chart);
       mermaid.render(id.current, fixedChart).then(({ svg }) => {
         if (!dead && ref.current) {
           ref.current.innerHTML = svg;
           const el = ref.current.querySelector('svg');
           if (el) { el.style.maxWidth = '100%'; el.style.height = 'auto'; }
         }
-      }).catch(() => { if (!dead && ref.current) ref.current.style.display = 'none'; });
+      }).catch(() => {
+        if (!dead && ref.current) {
+          ref.current.innerHTML = `<pre class="text-xs text-slate-700 whitespace-pre-wrap font-mono">${normalize(chart)}</pre>`;
+        }
+      });
     });
     return () => { dead = true; };
   }, [chart]);
