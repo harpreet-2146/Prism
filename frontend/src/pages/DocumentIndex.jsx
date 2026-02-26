@@ -214,10 +214,14 @@ function TOCPanel({ doc, indexData, loading, error, onGenerate, onSelect }) {
           <div className="flex-1 min-w-0">
             <h2 className="text-sm font-semibold text-stone-800 leading-snug line-clamp-2">{doc.originalName}</h2>
             {indexData?.overview && (
-              <p className="text-xs text-stone-400 mt-0.5 line-clamp-2">{indexData.overview.description || indexData.overview.summary}</p>
+              <p className="text-xs text-stone-400 mt-0.5 line-clamp-2">
+                {typeof indexData.overview === 'string'
+                  ? indexData.overview
+                  : (indexData.overview.description || indexData.overview.summary)}
+              </p>
             )}
           </div>
-          <button onClick={onGenerate} title="Regenerate"
+          <button onClick={() => onGenerate(true)} title="Regenerate"
             className="flex-shrink-0 p-1.5 rounded-lg text-stone-300 hover:text-stone-600 hover:bg-stone-100 transition-all">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
@@ -352,37 +356,55 @@ function ChatHint({ selection, doc, onClear }) {
 }
 
 // ─── Document workspace (TOC + chat hint) ─────────────────────────────────────
-function DocWorkspace({ doc, onBack }) {
+function DocWorkspace({ doc, onBack, cachedIndex, onCacheIndex }) {
   const [indexData, setIndexData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selection, setSelection] = useState(null);
 
-  const generate = useCallback(async () => {
+  const generate = useCallback(async (force = false) => {
+    if (!force && indexData) return;
     setLoading(true);
     setError(null);
     try {
-      // Try load existing first
+      if (!force && cachedIndex) {
+        setIndexData(cachedIndex);
+        return;
+      }
+
+      // Always try existing persisted index first
       const existingRes = await api.get(`/documents/${doc.id}`);
       const existing = existingRes.data?.data || existingRes.data || {};
       const existIdx = existing.indexData || existing.index;
-      if (existIdx) {
-        setIndexData(typeof existIdx === 'string' ? JSON.parse(existIdx) : existIdx);
+      if (existIdx && !force) {
+        const parsed = typeof existIdx === 'string' ? JSON.parse(existIdx) : existIdx;
+        setIndexData(parsed);
+        onCacheIndex?.(doc.id, parsed);
         return;
       }
-      // Generate
+
+      // Generate only when missing (or explicit refresh)
       const genRes = await api.post(`/documents/${doc.id}/generate-index`);
       const result = genRes.data?.data || genRes.data || {};
       const idx = result.indexData || result.index || result;
-      setIndexData(typeof idx === 'string' ? JSON.parse(idx) : idx);
+      const parsed = typeof idx === 'string' ? JSON.parse(idx) : idx;
+      setIndexData(parsed);
+      onCacheIndex?.(doc.id, parsed);
     } catch (e) {
-      setError(e.message);
+      setError(e?.response?.data?.message || e?.message || 'Index generation failed');
     } finally {
       setLoading(false);
     }
-  }, [doc.id]);
+  }, [doc.id, cachedIndex, indexData, onCacheIndex]);
 
-  useEffect(() => { generate(); }, []);
+  useEffect(() => {
+    if (cachedIndex) {
+      setIndexData(cachedIndex);
+      setError(null);
+      return;
+    }
+    generate(false);
+  }, [doc.id, cachedIndex]);
 
   return (
     <div className="flex flex-col h-full">
@@ -426,6 +448,7 @@ export default function DocumentIndex() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [indexCache, setIndexCache] = useState({});
 
   useEffect(() => {
     api.get('/documents')
@@ -456,7 +479,12 @@ export default function DocumentIndex() {
   // Show workspace for selected doc
   if (selected) return (
     <div className="h-full bg-white">
-      <DocWorkspace doc={selected} onBack={() => setSelected(null)} />
+      <DocWorkspace
+        doc={selected}
+        onBack={() => setSelected(null)}
+        cachedIndex={indexCache[selected.id]}
+        onCacheIndex={(docId, index) => setIndexCache(prev => ({ ...prev, [docId]: index }))}
+      />
     </div>
   );
 
