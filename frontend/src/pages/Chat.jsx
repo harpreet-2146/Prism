@@ -107,7 +107,7 @@ export default function Chat() {
           <div>
           {/* Conversation toolbar */}
           <div className="sticky top-0 z-10 flex items-center justify-end gap-2 px-6 sm:px-10 lg:px-16 py-2 bg-white/90 backdrop-blur-sm border-b border-slate-100">
-            <ExportButton conversationId={conversationId} title={currentConversation?.title} />
+            <ExportButton conversationId={conversationId || currentConversation?.id} title={currentConversation?.title} />
           </div>
           <div className="divide-y divide-slate-100">
             {messages.map(msg => (
