@@ -5,125 +5,209 @@ const { PrismaClient } = require('@prisma/client');
 const Groq = require('groq-sdk');
 const axios = require('axios');
 const embeddingSearchService = require('../services/vector/embedding-search.service');
-const tavilyService = require('../services/tavily.service');
 
 const prisma = new PrismaClient();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const BASE_URL = process.env.BASE_URL || 'http://localhost:5000';
+
+const BASE_URL       = process.env.BASE_URL            || 'http://localhost:5000';
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+const GROQ_MODEL     = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
+const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '8000', 10);
+const GROQ_TEMP      = parseFloat(process.env.GROQ_TEMPERATURE || '0.3');
+const TAVILY_DEPTH   = process.env.TAVILY_SEARCH_DEPTH  || 'advanced';
+const TAVILY_MAX     = parseInt(process.env.TAVILY_MAX_RESULTS || '3', 10);
+const EMBED_TOP_K    = 20; // Retrieve more chunks — POSC spans many pages
 
 function toImageUrl(storagePath) {
   if (!storagePath) return null;
-  const filename = storagePath.split(/[/\\]/).pop();
-  return `${BASE_URL}/outputs/${filename}`;
+  return `${BASE_URL}/outputs/${storagePath.split(/[/\\]/).pop()}`;
 }
 
-function extractPageNumbersFromText(text) {
+function extractPageNumbers(text) {
   const pages = new Set();
   const patterns = [
     /\[Ref:\s*Page[s]?\s*(\d+)(?:\s*[-–]\s*(\d+))?\]/gi,
     /\[Ref:\s*Pages?\s*([\d,\s]+)\]/gi,
   ];
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      const nums = match[0].match(/\d+/g) || [];
-      nums.forEach(n => {
-        const p = parseInt(n);
-        pages.add(Math.max(1, p - 1));
-        pages.add(p);
-        pages.add(p + 1);
+  for (const p of patterns) {
+    let m;
+    while ((m = p.exec(text)) !== null) {
+      (m[0].match(/\d+/g) || []).forEach(n => {
+        const pg = parseInt(n);
+        pages.add(Math.max(1, pg - 1));
+        pages.add(pg);
+        pages.add(pg + 1);
       });
     }
   }
   return Array.from(pages).sort((a, b) => a - b);
 }
 
-async function findImagesForResponse(responseText, relevantChunks, documentIds) {
+async function findImages(responseText, chunks, documentIds) {
   try {
-    let pageNumbers = extractPageNumbersFromText(responseText);
-
-    if (pageNumbers.length === 0 && relevantChunks.length > 0) {
-      const chunkPages = new Set();
-      for (const chunk of relevantChunks) {
-        if (chunk.pageNumber) {
-          for (let p = Math.max(1, chunk.pageNumber - 1); p <= chunk.pageNumber + 1; p++) {
-            chunkPages.add(p);
-          }
+    let pages = extractPageNumbers(responseText);
+    if (pages.length === 0 && chunks.length > 0) {
+      const s = new Set();
+      for (const c of chunks) {
+        if (c.pageNumber) {
+          for (let p = Math.max(1, c.pageNumber - 1); p <= c.pageNumber + 1; p++) s.add(p);
         }
       }
-      pageNumbers = Array.from(chunkPages).sort((a, b) => a - b);
+      pages = Array.from(s).sort((a, b) => a - b);
     }
+    if (pages.length === 0) return [];
 
-    if (pageNumbers.length === 0) return [];
-
-    const images = await prisma.documentImage.findMany({
-      where: { documentId: { in: documentIds }, pageNumber: { in: pageNumbers } },
-      orderBy: [{ pageNumber: 'asc' }, { imageIndex: 'asc' }]
-    });
-
-    const sourceImageIds = relevantChunks.filter(c => c.sourceImageId).map(c => c.sourceImageId);
-    let directImages = [];
-    if (sourceImageIds.length > 0) {
-      directImages = await prisma.documentImage.findMany({ where: { id: { in: sourceImageIds } } });
-    }
+    const [byPage, direct] = await Promise.all([
+      prisma.documentImage.findMany({
+        where: { documentId: { in: documentIds }, pageNumber: { in: pages } },
+        orderBy: [{ pageNumber: 'asc' }, { imageIndex: 'asc' }],
+      }),
+      chunks.filter(c => c.sourceImageId).length > 0
+        ? prisma.documentImage.findMany({ where: { id: { in: chunks.filter(c => c.sourceImageId).map(c => c.sourceImageId) } } })
+        : Promise.resolve([]),
+    ]);
 
     const seen = new Set();
-    const merged = [];
-    for (const img of [...directImages, ...images]) {
-      if (!seen.has(img.id)) { seen.add(img.id); merged.push(img); }
-    }
-    merged.sort((a, b) => a.pageNumber - b.pageNumber);
-
-    return merged.slice(0, 20).map(img => ({
-      url: toImageUrl(img.storagePath),
-      pageNumber: img.pageNumber,
-      imageIndex: img.imageIndex,
-      documentId: img.documentId,
-      width: img.width,
-      height: img.height
-    }));
+    return [...direct, ...byPage]
+      .filter(img => { if (seen.has(img.id)) return false; seen.add(img.id); return true; })
+      .sort((a, b) => a.pageNumber - b.pageNumber)
+      .slice(0, 20)
+      .map(img => ({ url: toImageUrl(img.storagePath), pageNumber: img.pageNumber, imageIndex: img.imageIndex, documentId: img.documentId, width: img.width, height: img.height }));
   } catch (err) {
-    console.error('Failed to fetch images:', err.message);
+    console.error('Image lookup failed:', err.message);
     return [];
   }
 }
 
-/**
- * Search Tavily and fetch actual page content from top SAP results.
- * Returns enriched results with real content, not just snippets.
- */
-async function searchAndFetchSAP(query) {
+async function searchSAP(query) {
   if (!TAVILY_API_KEY) return [];
-
   try {
-    // Step 1: Search Tavily focused on SAP help portal
-    const searchRes = await axios.post('https://api.tavily.com/search', {
+    const res = await axios.post('https://api.tavily.com/search', {
       api_key: TAVILY_API_KEY,
-      query: `site:help.sap.com ${query}`,
-      search_depth: 'advanced',
-      max_results: 3,
-      include_raw_content: true,  // get full page content, not just snippet
-      include_domains: ['help.sap.com', 'community.sap.com', 'launchpad.support.sap.com']
+      query: `SAP EWM ${query}`,
+      search_depth: TAVILY_DEPTH,
+      max_results: TAVILY_MAX,
+      include_raw_content: true,
+      include_domains: ['help.sap.com', 'community.sap.com'],
     }, { timeout: 8000 });
-
-    const results = searchRes.data?.results || [];
-
-    return results
+    return (res.data?.results || [])
       .filter(r => r.content || r.raw_content)
-      .map(r => ({
-        title: r.title,
-        url: r.url,
-        // Use raw_content if available (full page), fall back to snippet
-        content: (r.raw_content || r.content || '').substring(0, 2000)
-      }));
-
+      .map(r => ({ title: r.title, url: r.url, content: (r.raw_content || r.content || '').substring(0, 2500) }));
   } catch (err) {
-    console.error('Tavily search failed:', err.message);
+    console.error('Tavily failed:', err.message);
     return [];
   }
 }
 
+// ── System prompt ─────────────────────────────────────────────────────────────
+const SYSTEM_PROMPT = `You are PRISM, an SAP documentation expert producing a detailed technical reference article. Your output is rendered as a formatted document — NOT a chat message. The reader is a consultant implementing SAP EWM from scratch.
+
+═══════════════════════════════════════════════════════
+OUTPUT REQUIREMENTS — THESE ARE MANDATORY, NOT OPTIONAL
+═══════════════════════════════════════════════════════
+
+LENGTH: Your response MUST cover the topic exhaustively. For any process involving POSC, inbound, deconsolidation, or quality — minimum 12 steps, target 15–20 steps. A 4-step answer is WRONG and incomplete.
+
+STRUCTURE: Every step uses EXACTLY this format — no exceptions, no shortcuts:
+
+**Step N: [Precise descriptive title]**
+
+Navigation: [Full menu path using > separator] (T-code: XXXX if applicable) [Ref: Page X]
+
+Action:
+[Numbered list of exact actions — every field name, every value, every button click, every dropdown selection. Be explicit: "In the 'Warehouse Number' field, enter '0001'. Click the dropdown next to 'Process Category' and select '01 – Inbound Delivery'."]
+
+Result:
+[Exact screen state after this step. What message appears. What changes. What new fields become available. What the screen title becomes.]
+
+Watch Out:
+[ONE specific, real mistake that happens here. Not generic "save your work". Something actually specific to this configuration step.]
+
+═══════════════════════════════════════════════════════
+MERMAID — DECISION FLOWS ONLY
+═══════════════════════════════════════════════════════
+Use mermaid ONLY when a genuine YES/NO or multiple-path decision exists.
+Use ONLY valid Mermaid syntax. The ONLY valid edge format is: A --> B or A -->|label| B
+NEVER write: -->|text|> — the trailing > is INVALID and will break rendering.
+Example valid: A -->|Quality required| B
+Example INVALID: A -->|Quality required|> B
+
+For linear process sequences (most steps), use NUMBERED TEXT — no mermaid.
+
+═══════════════════════════════════════════════════════
+CONTENT DEPTH RULES
+═══════════════════════════════════════════════════════
+1. Mine the FULL document. If the document covers POSC, cover ALL of these aspects:
+   - Prerequisites and system requirements
+   - Warehouse structure configuration (warehouse number, storage type, storage section)
+   - POSC category and process code setup
+   - Queue type and workstation assignment
+   - Putaway strategy configuration
+   - Deconsolidation group and rules
+   - Quality inspection integration steps
+   - Handling unit management settings
+   - Transfer order creation and confirmation
+   - Exception handling and error messages
+   - T-codes for each major operation
+   - Testing steps to verify configuration
+
+2. Every Navigation line MUST include [Ref: Page X] from the source document
+3. T-codes go in inline code: \`/SCWM/PRDO\`
+4. Configuration values go in inline code: \`0001\`
+5. Field names are **bold**
+6. Never say "see screenshot" — screenshots attach automatically
+7. Fill gaps with standard SAP EWM knowledge when document lacks detail
+
+═══════════════════════════════════════════════════════
+WATCH OUT — CONDITIONAL, NOT REQUIRED FOR EVERY STEP
+═══════════════════════════════════════════════════════
+Watch Out is OPTIONAL. Include it ONLY when:
+- There is a specific, non-obvious mistake that consultants regularly make at this step
+- A wrong selection LOOKS valid but causes a silent failure later
+- A field has a confusing default that must be overridden
+
+DO NOT write Watch Out for obvious things like "remember to save" or "enter correct values".
+Bad: "Make sure to configure the correct number range intervals."
+Good: "If you select consolidation group type 'E' (External) instead of 'I' (Internal), 
+the system accepts it without error but the POSC flow will fail silently at goods receipt — 
+no error message, just missing transfer orders. Verify with T-code /SCWM/MON after saving."
+
+═══════════════════════════════════════════════════════
+MERMAID — DECISION BRANCHES ONLY, NEVER LINEAR SEQUENCES
+═══════════════════════════════════════════════════════
+Use mermaid ONLY for genuine YES/NO decision points. A → B → C → End is NOT a decision flow 
+— it is a linear sequence and must be written as numbered steps, not mermaid.
+
+Valid mermaid: "Does the delivery require quality inspection?"
+  YES → Create QI document → TO type QI
+  NO → Direct TO creation → Confirm TO
+
+Invalid mermaid: Configure POSC → Define Process Codes → Configure QI → End
+(This is just step 1, 2, 3 written as a diagram — never do this)
+
+Edge syntax: A -->|label| B  (NEVER A -->|label|> B — the trailing > breaks rendering)
+
+═══════════════════════════════════════════════════════
+WHAT A COMPLETE ANSWER LOOKS LIKE FOR POSC:
+═══════════════════════════════════════════════════════
+Step 1: Verify Warehouse Structure Prerequisites
+Step 2: Define POSC Consolidation Groups
+Step 3: Assign Number Ranges to Consolidation Groups  
+Step 4: Configure Process Codes for Inbound
+Step 5: Define Queue Types for POSC
+Step 6: Assign Workstations to Queue Types
+Step 7: Configure Putaway Control for POSC
+Step 8: Set Up Deconsolidation Groups
+Step 9: Configure Deconsolidation Rules
+Step 10: Configure Quality Inspection Integration
+Step 11: Activate QM in EWM Interface Settings
+Step 12: Set Up Handling Unit Management
+Step 13: Configure Transfer Order Requirements
+Step 14: Test POSC Inbound with a Sample Delivery
+Step 15: Verify Deconsolidation and Quality Results
+[additional steps as needed from document context]`;
+
+// ── Main handler ──────────────────────────────────────────────────────────────
 const streamChatResponse = async (req, res) => {
   const conversationId = req.params.id;
   const message = req.query.message;
@@ -141,10 +225,10 @@ const streamChatResponse = async (req, res) => {
   let conversation = null;
 
   try {
-    // ─── Conversation ──────────────────────────────────────────────────────
-    if (conversationId === 'new' || conversationId === 'undefined') {
+    // ── Conversation ──────────────────────────────────────────────────────
+    if (!conversationId || conversationId === 'new' || conversationId === 'undefined' || conversationId === 'null') {
       conversation = await prisma.conversation.create({
-        data: { userId, title: message.substring(0, 50) + (message.length > 50 ? '...' : '') }
+        data: { userId, title: message.substring(0, 60) + (message.length > 60 ? '…' : '') }
       });
       res.write(`data: ${JSON.stringify({ type: 'conversation_created', conversationId: conversation.id })}\n\n`);
       res.flush?.();
@@ -160,85 +244,67 @@ const streamChatResponse = async (req, res) => {
       data: { conversationId: conversation.id, role: 'user', content: message }
     });
 
-    // ─── Search embeddings ─────────────────────────────────────────────────
-    const relevantChunks = await embeddingSearchService.search(userId, message, 10);
-    const documentIds = [...new Set(relevantChunks.map(c => c.documentId).filter(Boolean))];
+    // ── Parallel: embeddings + Tavily ─────────────────────────────────────
+    const [relevantChunks, webResults] = await Promise.all([
+      embeddingSearchService.search(userId, message, EMBED_TOP_K),
+      searchSAP(message),
+    ]);
 
-    // ─── Tavily: fetch real SAP content ───────────────────────────────────
-    // Run in parallel with no blocking — only if doc context seems thin
-    const docWordCount = relevantChunks.reduce((sum, c) => sum + (c.text?.split(' ').length || 0), 0);
-    const needsWebContext = docWordCount < 300; // doc context is thin, supplement with web
-
-    let webResults = [];
-    if (needsWebContext && TAVILY_API_KEY) {
-      res.write(`data: ${JSON.stringify({ type: 'status', message: 'Fetching SAP documentation...' })}\n\n`);
-      res.flush?.();
-      webResults = await searchAndFetchSAP(message);
-      console.log(`🌐 Tavily: ${webResults.length} SAP pages fetched`);
+    if (webResults.length > 0) {
+      console.log(`🌐 Tavily: ${webResults.length} pages | query: "${message.slice(0, 50)}"`);
     }
 
-    // ─── Build context ─────────────────────────────────────────────────────
+    const documentIds = [...new Set(relevantChunks.map(c => c.documentId).filter(Boolean))];
+
+    // ── Build rich context ─────────────────────────────────────────────────
     let contextText = '';
 
     if (relevantChunks.length > 0) {
-      contextText += '\n\n📄 FROM YOUR UPLOADED DOCUMENTS:\n\n';
-      contextText += relevantChunks.map((chunk, i) =>
-        `[${i + 1}] "${chunk.documentName}" (Page ${chunk.pageNumber}):\n${chunk.text}`
-      ).join('\n\n');
+      contextText += '\n\n══ FROM YOUR UPLOADED SAP DOCUMENTS ══\n\n';
+      // Group chunks by document for clarity
+      const byDoc = {};
+      for (const chunk of relevantChunks) {
+        const key = chunk.documentName || 'Unknown';
+        if (!byDoc[key]) byDoc[key] = [];
+        byDoc[key].push(chunk);
+      }
+      for (const [docName, chunks] of Object.entries(byDoc)) {
+        contextText += `📄 Document: "${docName}"\n`;
+        chunks.forEach((chunk, i) => {
+          contextText += `[Chunk ${i + 1}, Page ${chunk.pageNumber}]:\n${chunk.text}\n\n`;
+        });
+      }
     }
 
     if (webResults.length > 0) {
-      contextText += '\n\n🌐 FROM SAP HELP PORTAL:\n\n';
+      contextText += '\n\n══ SAP HELP PORTAL SUPPLEMENT ══\n\n';
       webResults.forEach((r, i) => {
-        contextText += `[SAP ${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content}\n\n`;
+        contextText += `[SAP Online ${i + 1}] ${r.title}\n${r.url}\n${r.content}\n\n`;
       });
     }
 
-    // ─── History ───────────────────────────────────────────────────────────
-    const previousMessages = await prisma.message.findMany({
+    // ── History ────────────────────────────────────────────────────────────
+    const history = await prisma.message.findMany({
       where: { conversationId: conversation.id },
       orderBy: { createdAt: 'asc' },
-      take: 10
+      take: 8,
     });
 
-    // ─── System prompt ─────────────────────────────────────────────────────
-    const systemPrompt = [
-      "You are PRISM, a senior SAP implementation consultant writing a detailed training guide.",
-      "Your responses must be thorough — a junior consultant should follow with zero prior SAP knowledge.",
-      "",
-      "MANDATORY STRUCTURE FOR EVERY STEP:",
-      "Each **Step N: [Name]** must contain ALL of these sub-sections:",
-      "",
-      "Navigation: Exact menu path (e.g. SAP Easy Access > Tools > Customizing > IMG > ...). Include T-code if applicable. Cite [Ref: Page X] here.",
-      "",
-      "Action: Exactly what to click, type, select, or press. Name every field. Name every button. If dropdown, list the options. If table, describe the row. Use arrow notation for sequences.",
-      "",
-      "Result: What the screen looks like AFTER this step. What confirmation message appears. What changes in the UI. What new fields become available.",
-      "",
-      "Watch Out: One common mistake for this step. What goes wrong if done incorrectly.",
-      "",
-      "RULES:",
-      "- NEVER skip a sub-section. If document lacks info, use standard SAP behavior knowledge.",
-      "- Cite [Ref: Page X] after every step navigation line.",
-      "- Use ONLY the provided document context as primary source.",
-      "- For YES/NO decision branches ONLY, add a mermaid flowchart block. Linear steps get no mermaid.",
-      "- Minimum 150 words per step. More detail is always better.",
-      "- Screenshots attach automatically from referenced pages — never say see screenshot."
-    ].join("\n")
-
     const messages = [
-      { role: 'system', content: systemPrompt },
-      ...previousMessages.slice(0, -1).map(msg => ({ role: msg.role, content: msg.content })),
-      { role: 'user', content: message + contextText }
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...history.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+      { role: 'user', content: message + '\n\n' + contextText },
     ];
 
-    // ─── Stream from Groq ──────────────────────────────────────────────────
+    // ── Stream ─────────────────────────────────────────────────────────────
+    console.log(`🤖 ${GROQ_MODEL} | max_tokens=${GROQ_MAX_TOKENS} | chunks=${relevantChunks.length} | tavily=${webResults.length}`);
+
     const completion = await groq.chat.completions.create({
       messages,
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.2,
-      max_tokens: 4000,
-      stream: true
+      model: GROQ_MODEL,
+      temperature: GROQ_TEMP,
+      max_tokens: GROQ_MAX_TOKENS,
+      stream: true,
     });
 
     let fullResponse = '';
@@ -251,16 +317,15 @@ const streamChatResponse = async (req, res) => {
       }
     }
 
-    // ─── Find images ───────────────────────────────────────────────────────
-    const images = await findImagesForResponse(fullResponse, relevantChunks, documentIds);
+    // ── Images + save ──────────────────────────────────────────────────────
+    const images = await findImages(fullResponse, relevantChunks, documentIds);
 
-    // ─── Save ──────────────────────────────────────────────────────────────
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
         role: 'assistant',
         content: fullResponse,
-        images: images.length > 0 ? images : null
+        images: images.length > 0 ? images : null,
       }
     });
 
@@ -268,13 +333,13 @@ const streamChatResponse = async (req, res) => {
       type: 'done',
       conversationId: conversation.id,
       images,
-      webSearchUsed: webResults.length > 0
+      webSearchUsed: webResults.length > 0,
     })}\n\n`);
 
     res.end();
 
   } catch (error) {
-    console.error('❌ SSE stream error:', error);
+    console.error('❌ SSE error:', error);
     res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
     res.end();
   }
