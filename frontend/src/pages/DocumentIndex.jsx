@@ -13,6 +13,8 @@ import { cn } from '@/lib/utils';
 // Uses the project's axios instance — no double /api prefix
 import api from '@/lib/api';
 
+const INDEX_CACHE_PREFIX = 'doc-index-cache:';
+
 // ─── Status badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
   const s = (status || '').toUpperCase();
@@ -261,7 +263,7 @@ function TOCPanel({ doc, indexData, loading, error, onGenerate, onSelect }) {
           <div className="flex flex-col items-center py-16 gap-3">
             <AlertTriangle className="h-6 w-6 text-amber-400" />
             <p className="text-xs text-stone-500">{error}</p>
-            <button onClick={onGenerate} className="text-xs text-blue-500 hover:text-blue-600 underline">Retry</button>
+            <button onClick={() => onGenerate(true)} className="text-xs text-blue-500 hover:text-blue-600 underline">Retry</button>
           </div>
         )}
 
@@ -269,7 +271,7 @@ function TOCPanel({ doc, indexData, loading, error, onGenerate, onSelect }) {
           <div className="flex flex-col items-center py-16 gap-4">
             <BookOpen className="h-8 w-8 text-stone-200" />
             <p className="text-xs text-stone-400 text-center">No index yet for this document</p>
-            <button onClick={onGenerate}
+            <button onClick={() => onGenerate(true)}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium transition-colors shadow-sm shadow-blue-100">
               <Zap className="h-3.5 w-3.5" /> Generate Index
             </button>
@@ -362,49 +364,81 @@ function DocWorkspace({ doc, onBack, cachedIndex, onCacheIndex }) {
   const [error, setError] = useState(null);
   const [selection, setSelection] = useState(null);
 
-  const generate = useCallback(async (force = false) => {
-    if (!force && indexData) return;
+  const loadExistingIndex = useCallback(async () => {
+    if (cachedIndex) {
+      setIndexData(cachedIndex);
+      setError(null);
+      return;
+    }
+
+    try {
+      const raw = localStorage.getItem(`${INDEX_CACHE_PREFIX}${doc.id}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setIndexData(parsed);
+        onCacheIndex?.(doc.id, parsed);
+        setError(null);
+        return;
+      }
+    } catch (_) {
+      // Ignore malformed local cache.
+    }
+
     setLoading(true);
     setError(null);
     try {
-      if (!force && cachedIndex) {
-        setIndexData(cachedIndex);
-        return;
-      }
-
-      // Always try existing persisted index first
       const existingRes = await api.get(`/documents/${doc.id}`);
       const existing = existingRes.data?.data || existingRes.data || {};
       const existIdx = existing.indexData || existing.index;
-      if (existIdx && !force) {
+      if (existIdx) {
         const parsed = typeof existIdx === 'string' ? JSON.parse(existIdx) : existIdx;
         setIndexData(parsed);
         onCacheIndex?.(doc.id, parsed);
+        try {
+          localStorage.setItem(`${INDEX_CACHE_PREFIX}${doc.id}`, JSON.stringify(parsed));
+        } catch (_) {
+          // Ignore storage issues.
+        }
         return;
       }
+      setIndexData(null);
+    } catch (e) {
+      setError(e?.response?.data?.message || e?.message || 'Failed to load index');
+    } finally {
+      setLoading(false);
+    }
+  }, [doc.id, cachedIndex, onCacheIndex]);
 
-      // Generate only when missing (or explicit refresh)
+  const generate = useCallback(async (force = false) => {
+    if (!force) {
+      await loadExistingIndex();
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
       const genRes = await api.post(`/documents/${doc.id}/generate-index`);
       const result = genRes.data?.data || genRes.data || {};
       const idx = result.indexData || result.index || result;
       const parsed = typeof idx === 'string' ? JSON.parse(idx) : idx;
       setIndexData(parsed);
       onCacheIndex?.(doc.id, parsed);
+      try {
+        localStorage.setItem(`${INDEX_CACHE_PREFIX}${doc.id}`, JSON.stringify(parsed));
+      } catch (_) {
+        // Ignore storage issues.
+      }
     } catch (e) {
       setError(e?.response?.data?.message || e?.message || 'Index generation failed');
     } finally {
       setLoading(false);
     }
-  }, [doc.id, cachedIndex, indexData, onCacheIndex]);
+  }, [doc.id, onCacheIndex, loadExistingIndex]);
 
   useEffect(() => {
-    if (cachedIndex) {
-      setIndexData(cachedIndex);
-      setError(null);
-      return;
-    }
-    generate(false);
-  }, [doc.id, cachedIndex]);
+    loadExistingIndex();
+  }, [doc.id, loadExistingIndex]);
 
   return (
     <div className="flex flex-col h-full">
@@ -450,6 +484,10 @@ export default function DocumentIndex() {
   const [selected, setSelected] = useState(null);
   const [indexCache, setIndexCache] = useState({});
 
+  const cacheIndexForDoc = useCallback((docId, index) => {
+    setIndexCache(prev => ({ ...prev, [docId]: index }));
+  }, []);
+
   useEffect(() => {
     api.get('/documents')
       .then(r => {
@@ -483,7 +521,7 @@ export default function DocumentIndex() {
         doc={selected}
         onBack={() => setSelected(null)}
         cachedIndex={indexCache[selected.id]}
-        onCacheIndex={(docId, index) => setIndexCache(prev => ({ ...prev, [docId]: index }))}
+        onCacheIndex={cacheIndexForDoc}
       />
     </div>
   );
