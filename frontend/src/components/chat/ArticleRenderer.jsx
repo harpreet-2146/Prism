@@ -14,10 +14,13 @@ function MermaidDiagram({ chart }) {
     let dead = false;
     const normalize = (input) => String(input || '')
       .trim()
+      .replace(/[–—]/g, '-')
+      .replace(/→/g, '-->')
       .replace(/\|([^|]*)\|>/g, '|$1|')
       .replace(/-->/g, ' --> ')
       .replace(/[“”]/g, '"')
-      .replace(/[‘’]/g, "'");
+      .replace(/[‘’]/g, "'")
+      .replace(/\n{3,}/g, '\n\n');
     import('mermaid').then(m => {
       const mermaid = m.default;
       mermaid.initialize({
@@ -161,19 +164,21 @@ function NavPath({ text }) {
 // ── Parse step content into labelled sub-sections ─────────────────────────────
 function parseSubsections(text) {
   // Labels we recognise (case insensitive)
-  const labels = ['Navigation', 'Action', 'Result', 'Watch Out', 'Note', 'Warning'];
-  const re = new RegExp(`(${labels.join('|')})\\s*:`, 'gi');
+  const labels = ['Navigation', 'Action', 'Result', 'Watch Out', 'Note', 'Disclaimer', 'Warning'];
+  const re = new RegExp(`(?:^|\\n)\\s*(${labels.join('|')})\\s*:`, 'gi');
 
   const sections = [];
-  let lastIndex = 0;
-  let lastLabel = null;
   let match;
   const matches = [];
 
   // Collect all label positions
   re.lastIndex = 0;
   while ((match = re.exec(text)) !== null) {
-    matches.push({ label: match[1], index: match.index, end: match.index + match[0].length });
+    const full = match[0];
+    const labelStartOffset = full.lastIndexOf(match[1]);
+    const labelIndex = match.index + Math.max(0, labelStartOffset);
+    const end = labelIndex + match[1].length + 1; // include trailing colon
+    matches.push({ label: match[1], index: labelIndex, end });
   }
 
   if (matches.length === 0) return null; // No structured content found
@@ -199,6 +204,15 @@ function SubSection({ label, content }) {
   if (!content.trim()) return null;
 
   const lowerLabel = label?.toLowerCase();
+  const cleanWatchOut = (txt) => String(txt || '')
+    .replace(/```mermaid[\s\S]*?```/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // Explicitly hide note/disclaimer sections from response UI.
+  if (lowerLabel === 'note' || lowerLabel === 'disclaimer') {
+    return null;
+  }
 
   if (lowerLabel === 'navigation') {
     return (
@@ -241,6 +255,7 @@ function SubSection({ label, content }) {
   }
 
   if (lowerLabel === 'watch out' || lowerLabel === 'warning' || lowerLabel === 'note') {
+    const safeContent = cleanWatchOut(content);
     return (
       <div className="mb-5">
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5">
@@ -250,7 +265,9 @@ function SubSection({ label, content }) {
               {label}
             </p>
           </div>
-          <div className="text-[0.9375rem] text-amber-800 leading-relaxed">{content}</div>
+          <div className="text-[0.9375rem] text-amber-800 leading-relaxed">
+            <Prose text={safeContent} />
+          </div>
         </div>
       </div>
     );
@@ -276,6 +293,12 @@ function extractPages(text) {
       pages.add(p);
     });
   }
+  // Additional fallback signal: "page 12" / "p.12"
+  const loosePageRefs = text.match(/\b(?:page|p\.)\s*(\d+)\b/gi) || [];
+  loosePageRefs.forEach((entry) => {
+    const n = parseInt((entry.match(/\d+/) || [])[0], 10);
+    if (Number.isFinite(n) && n > 0) pages.add(n);
+  });
   return Array.from(pages).filter(p => p > 0);
 }
 
@@ -364,18 +387,31 @@ export default function ArticleRenderer({ content, images = [] }) {
   const stepImages = useMemo(() => {
     if (!steps) return [];
     const used = new Set();
-    return steps.map(step => {
-      const candidates = parsedImages.filter(img => step.pages.includes(img.pageNumber));
-      const result = [];
-      for (const img of candidates) {
-        if (!used.has(img.url) && result.length < 3) {
+    const pool = [...parsedImages].sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0));
+
+    return steps.map((step) => {
+      const refs = Array.isArray(step.pages) ? step.pages : [];
+      const scored = pool
+        .filter((img) => !used.has(img.url))
+        .map((img) => {
+          if (!refs.length) return { img, score: 9999 };
+          const distance = Math.min(...refs.map((p) => Math.abs((img.pageNumber || 0) - p)));
+          return { img, score: distance };
+        })
+        .sort((a, b) => a.score - b.score);
+
+      const picked = [];
+      for (const { img, score } of scored) {
+        // With refs: keep tight page match; without refs: allow first unused.
+        if ((refs.length && score <= 1) || (!refs.length && picked.length < 1)) {
+          picked.push(img);
           used.add(img.url);
-          result.push(img);
         }
+        if (picked.length >= 3) break;
       }
-      return result;
+      return picked;
     });
-  }, [content, parsedImages.length]);
+  }, [steps, parsedImages]);
 
   // ── Extract doc-level title from first step or content ───────────────────
   const docTitle = useMemo(() => {
