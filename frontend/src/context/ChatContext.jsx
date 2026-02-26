@@ -2,7 +2,7 @@
 // Fixed: conversationId is always extracted as string before passing to API
 // Prevents [object Object] appearing in SSE URLs
 
-import { createContext, useState, useCallback } from 'react';
+import { createContext, useState, useCallback, useRef } from 'react';
 import { conversationsAPI, chatAPI } from '@lib/api';
 
 export const ChatContext = createContext(null);
@@ -22,6 +22,7 @@ export function ChatProvider({ children }) {
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [streamController, setStreamController] = useState(null);
+  const streamingRef = useRef(false);
 
   const fetchConversations = useCallback(async () => {
     try {
@@ -79,12 +80,17 @@ export function ChatProvider({ children }) {
       streamController.close();
       setStreamController(null);
     }
+    streamingRef.current = false;
     setStreaming(false);
     // Mark last streaming message as done
     setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m));
   }, [streamController]);
 
   const sendStreamingMessage = useCallback(async (content, conversationId = null) => {
+    if (streamingRef.current) {
+      return resolveId(conversationId) || resolveId(currentConversation);
+    }
+
     // ── Always resolve to a plain string ──────────────────────────────────
     const actualId = resolveId(conversationId) || resolveId(currentConversation);
 
@@ -105,6 +111,7 @@ export function ChatProvider({ children }) {
       images: [],
       createdAt: new Date().toISOString(),
     }]);
+    streamingRef.current = true;
     setStreaming(true);
 
     return new Promise((resolve, reject) => {
@@ -143,6 +150,7 @@ export function ChatProvider({ children }) {
           }
 
           fetchConversations();
+          streamingRef.current = false;
           setStreaming(false);
           setStreamController(null);
           resolve(data.conversationId ? resolveId(data.conversationId) : actualId);
@@ -150,7 +158,14 @@ export function ChatProvider({ children }) {
         // onError
         error => {
           console.error('Streaming error:', error);
-          setMessages(prev => prev.filter(m => m.id !== assistantId));
+          const raw = error?.error || error?.message || 'Request failed';
+          const msg = /rate limit|429|try again/i.test(raw)
+            ? `Groq rate limit reached. Please wait and retry, or reduce response size. ${raw}`
+            : `Response failed: ${raw}`;
+          setMessages(prev => prev.map(m => (
+            m.id === assistantId ? { ...m, streaming: false, content: msg } : m
+          )));
+          streamingRef.current = false;
           setStreaming(false);
           setStreamController(null);
           reject(error);
