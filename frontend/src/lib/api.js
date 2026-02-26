@@ -1,6 +1,3 @@
-// frontend/src/lib/api.js
-// Fixed: streamMessage chatId always extracted as string (prevents [object Object] in URL)
-
 import axios from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
@@ -11,19 +8,19 @@ const api = axios.create({
 });
 
 api.interceptors.request.use(
-  config => {
+  (config) => {
     const token = localStorage.getItem('accessToken');
     if (token) config.headers.Authorization = `Bearer ${token}`;
     return config;
   },
-  error => Promise.reject(error)
+  (error) => Promise.reject(error)
 );
 
 api.interceptors.response.use(
-  response => response,
-  async error => {
+  (response) => response,
+  async (error) => {
     const originalRequest = error.config;
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && !originalRequest?._retry) {
       originalRequest._retry = true;
       const refreshToken = localStorage.getItem('refreshToken');
       if (!refreshToken) {
@@ -50,10 +47,10 @@ api.interceptors.response.use(
 );
 
 export const authAPI = {
-  register: data => api.post('/auth/register', data),
-  login: data => api.post('/auth/login', data),
-  logout: refreshToken => api.post('/auth/logout', { refreshToken }),
-  refresh: refreshToken => api.post('/auth/refresh', { refreshToken }),
+  register: (data) => api.post('/auth/register', data),
+  login: (data) => api.post('/auth/login', data),
+  logout: (refreshToken) => api.post('/auth/logout', { refreshToken }),
+  refresh: (refreshToken) => api.post('/auth/refresh', { refreshToken }),
   me: () => api.get('/auth/me'),
 };
 
@@ -67,61 +64,110 @@ export const documentsAPI = {
     });
   },
   getAll: () => api.get('/documents'),
-  getById: id => api.get(`/documents/${id}`),
-  delete: id => api.delete(`/documents/${id}`),
+  getById: (id) => api.get(`/documents/${id}`),
+  delete: (id) => api.delete(`/documents/${id}`),
 };
 
 export const chatAPI = {
-  create: title => api.post('/chat/conversations', { title }),
+  create: (title) => api.post('/chat/conversations', { title }),
   getAll: () => api.get('/chat/conversations'),
-  getById: id => api.get(`/chat/conversations/${id}`),
-  delete: id => api.delete(`/chat/conversations/${id}`),
+  getById: (id) => api.get(`/chat/conversations/${id}`),
+  delete: (id) => api.delete(`/chat/conversations/${id}`),
   sendMessage: (conversationId, message) =>
     api.post(`/chat/conversations/${conversationId}/messages`, { message }),
 
+  // Uses fetch streaming with Authorization header to avoid exposing token in URL query.
   streamMessage: (conversationId, message, onChunk, onComplete, onError) => {
     const token = localStorage.getItem('accessToken');
-    if (!token) { onError({ error: 'Not authenticated' }); return null; }
+    if (!token) {
+      onError({ error: 'Not authenticated' });
+      return null;
+    }
 
-    // ── FIX: always resolve to a plain string ID, never pass objects ──────
     let chatId = 'new';
     if (conversationId) {
-      // Handle both string IDs and accidental object refs like { id: '...' }
       chatId = typeof conversationId === 'object'
         ? (conversationId?.id || 'new')
         : String(conversationId);
     }
 
-    const url = `${API_BASE_URL}/chat/conversations/${chatId}/stream?message=${encodeURIComponent(message)}&token=${encodeURIComponent(token)}`;
-    console.log('🌐 SSE stream → conversationId:', chatId);
+    const url = `${API_BASE_URL}/chat/conversations/${chatId}/stream?message=${encodeURIComponent(message)}`;
+    const abortController = new AbortController();
+    let finished = false;
 
-    const eventSource = new EventSource(url);
+    const processSSEBlock = (block) => {
+      const lines = block.split('\n');
+      const dataLines = lines
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trim());
 
-    eventSource.onmessage = event => {
+      if (dataLines.length === 0) return;
+
       try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'token') onChunk(data);
-        else if (data.type === 'done') { onComplete(data); eventSource.close(); }
-        else if (data.type === 'error') { onError(data); eventSource.close(); }
+        const payload = JSON.parse(dataLines.join('\n'));
+        if (payload.type === 'token') onChunk(payload);
+        else if (payload.type === 'info') onChunk({ content: '' });
+        else if (payload.type === 'done') {
+          finished = true;
+          onComplete(payload);
+        } else if (payload.type === 'error') {
+          finished = true;
+          onError(payload);
+        }
       } catch (e) {
         console.error('SSE parse error:', e);
       }
     };
 
-    eventSource.onerror = error => {
-      console.error('SSE connection error:', error);
-      onError({ error: 'Connection lost' });
-      eventSource.close();
-    };
+    (async () => {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'text/event-stream',
+          },
+          signal: abortController.signal,
+        });
 
-    return eventSource;
+        if (!response.ok || !response.body) {
+          let bodyText = '';
+          try { bodyText = await response.text(); } catch (_) { bodyText = ''; }
+          onError({ error: bodyText || `Stream request failed (${response.status})` });
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (!finished) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const chunks = buffer.split('\n\n');
+          buffer = chunks.pop() || '';
+          for (const chunk of chunks) {
+            processSSEBlock(chunk);
+            if (finished) break;
+          }
+        }
+      } catch (error) {
+        if (abortController.signal.aborted) return;
+        if (!finished) onError({ error: 'Connection lost' });
+      }
+    })();
+
+    return { close: () => abortController.abort() };
   },
 };
 
 export const exportAPI = {
-  exportPDF: conversationId =>
+  exportPDF: (conversationId) =>
     api.get(`/export/conversation/${conversationId}/pdf`, { responseType: 'blob' }),
-  exportDOCX: conversationId =>
+  exportDOCX: (conversationId) =>
     api.get(`/export/conversation/${conversationId}/docx`, { responseType: 'blob' }),
 };
 
