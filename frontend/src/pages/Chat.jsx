@@ -68,6 +68,7 @@ export default function Chat() {
   const endRef = useRef(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const prevConvIdRef = useRef(null);
+  const initialQuerySentRef = useRef(false);
 
   useEffect(() => {
     if (conversationId === prevConvIdRef.current) return;
@@ -78,7 +79,11 @@ export default function Chat() {
 
   useEffect(() => {
     const q = searchParams.get('q');
-    if (q && messages.length === 0 && !conversationId) sendStreamingMessage(q, null);
+    if (!q || initialQuerySentRef.current) return;
+    if (messages.length === 0 && !conversationId) {
+      initialQuerySentRef.current = true;
+      sendStreamingMessage(q, null);
+    }
   }, []);
 
   useEffect(() => {
