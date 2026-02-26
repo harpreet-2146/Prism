@@ -50,7 +50,17 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Request logging (development only)
 if (config.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
+  app.use(morgan((tokens, req, res) => {
+    const pathOnly = req.originalUrl ? req.originalUrl.split('?')[0] : req.url;
+    return [
+      tokens.method(req, res),
+      pathOnly,
+      tokens.status(req, res),
+      tokens['response-time'](req, res), 'ms',
+      '-',
+      tokens.res(req, res, 'content-length') || '-',
+    ].join(' ');
+  }));
 }
 
 console.log('✅ Middleware configured\n');
