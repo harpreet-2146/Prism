@@ -14,6 +14,9 @@ const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 const GROQ_MODEL     = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
 const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '8000', 10);
 const GROQ_TEMP      = parseFloat(process.env.GROQ_TEMPERATURE || '0.3');
+const GROQ_CONTINUATION_MAX_TOKENS = parseInt(process.env.GROQ_CONTINUATION_MAX_TOKENS || '4000', 10);
+const ARTICLE_MIN_STEPS = parseInt(process.env.ARTICLE_MIN_STEPS || '12', 10);
+const ARTICLE_MIN_WORDS = parseInt(process.env.ARTICLE_MIN_WORDS || '1400', 10);
 const TAVILY_DEPTH   = process.env.TAVILY_SEARCH_DEPTH  || 'advanced';
 const TAVILY_MAX     = parseInt(process.env.TAVILY_MAX_RESULTS || '3', 10);
 const EMBED_TOP_K    = 20; // Retrieve more chunks — POSC spans many pages
@@ -100,13 +103,55 @@ async function searchSAP(query) {
 }
 
 // ── System prompt ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are PRISM, an SAP documentation expert producing a detailed technical reference article. Your output is rendered as a formatted document — NOT a chat message. The reader is a consultant implementing SAP EWM from scratch.
+function normalizeMermaidSyntax(text) {
+  return String(text || '')
+    .replace(/-->\|([^|]+)\|>/g, '-->|$1|')
+    .replace(/\|([^|]+)\|>/g, '|$1|');
+}
+
+function getStepCount(text) {
+  return (String(text || '').match(/\*\*Step\s+\d+/gi) || []).length;
+}
+
+function getWordCount(text) {
+  return (String(text || '').match(/\b[\w/-]+\b/g) || []).length;
+}
+
+function needsExpansion(text) {
+  return getStepCount(text) < ARTICLE_MIN_STEPS || getWordCount(text) < ARTICLE_MIN_WORDS;
+}
+
+function buildTopicGuard(userMessage, chunks = []) {
+  const query = String(userMessage || '').trim();
+  const haystack = [
+    query,
+    ...chunks.map((c) => `${c.documentName || ''} ${c.text || ''}`),
+  ].join(' ');
+
+  const modules = Array.from(new Set(
+    (haystack.match(/\b(EWM|WM|MM|SD|FI|CO|PP|QM|TM|HCM|BW|ABAP|S\/4HANA)\b/gi) || [])
+      .map((m) => m.toUpperCase())
+  ));
+
+  const moduleHint = modules.length > 0
+    ? `Detected topic/module hints: ${modules.join(', ')}.`
+    : 'No explicit SAP module keyword detected; infer from retrieved document context.';
+
+  return `Scope discipline:
+- Answer ONLY the user question and retrieved document/web context.
+- Do NOT default to POSC or EWM unless the user/context explicitly asks for it.
+- If user asks about another document/topic, stay on that topic only.
+- If module terms conflict, prioritize the most relevant retrieved chunks.
+${moduleHint}`;
+}
+
+const SYSTEM_PROMPT = `You are PRISM, an SAP documentation expert producing a detailed technical reference article. Your output is rendered as a formatted document — NOT a chat message. The reader is a consultant implementing SAP from source documents.
 
 ═══════════════════════════════════════════════════════
 OUTPUT REQUIREMENTS — THESE ARE MANDATORY, NOT OPTIONAL
 ═══════════════════════════════════════════════════════
 
-LENGTH: Your response MUST cover the topic exhaustively. For any process involving POSC, inbound, deconsolidation, or quality — minimum 12 steps, target 15–20 steps. A 4-step answer is WRONG and incomplete.
+LENGTH: Your response MUST cover the topic exhaustively. For process/configuration questions, minimum 10 steps, target 12–18 steps based on topic complexity. A 4-step answer is usually incomplete.
 
 STRUCTURE: Every step uses EXACTLY this format — no exceptions, no shortcuts:
 
@@ -156,7 +201,7 @@ CONTENT DEPTH RULES
 4. Configuration values go in inline code: \`0001\`
 5. Field names are **bold**
 6. Never say "see screenshot" — screenshots attach automatically
-7. Fill gaps with standard SAP EWM knowledge when document lacks detail
+7. Fill gaps with standard SAP knowledge for the detected module when document lacks detail
 
 ═══════════════════════════════════════════════════════
 WATCH OUT — CONDITIONAL, NOT REQUIRED FOR EVERY STEP
@@ -188,7 +233,7 @@ Invalid mermaid: Configure POSC → Define Process Codes → Configure QI → En
 Edge syntax: A -->|label| B  (NEVER A -->|label|> B — the trailing > breaks rendering)
 
 ═══════════════════════════════════════════════════════
-WHAT A COMPLETE ANSWER LOOKS LIKE FOR POSC:
+WHEN THE TOPIC IS POSC, a complete answer may look like:
 ═══════════════════════════════════════════════════════
 Step 1: Verify Warehouse Structure Prerequisites
 Step 2: Define POSC Consolidation Groups
@@ -292,6 +337,7 @@ const streamChatResponse = async (req, res) => {
 
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildTopicGuard(message, relevantChunks) },
       ...history.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
       { role: 'user', content: message + '\n\n' + contextText },
     ];
@@ -299,22 +345,51 @@ const streamChatResponse = async (req, res) => {
     // ── Stream ─────────────────────────────────────────────────────────────
     console.log(`🤖 ${GROQ_MODEL} | max_tokens=${GROQ_MAX_TOKENS} | chunks=${relevantChunks.length} | tavily=${webResults.length}`);
 
-    const completion = await groq.chat.completions.create({
-      messages,
-      model: GROQ_MODEL,
-      temperature: GROQ_TEMP,
-      max_tokens: GROQ_MAX_TOKENS,
-      stream: true,
-    });
+    const streamCompletion = async (payload, maxTokens) => {
+      const completion = await groq.chat.completions.create({
+        messages: payload,
+        model: GROQ_MODEL,
+        temperature: GROQ_TEMP,
+        max_tokens: maxTokens,
+        stream: true,
+      });
 
-    let fullResponse = '';
-    for await (const chunk of completion) {
-      const content = chunk.choices[0]?.delta?.content || '';
-      if (content) {
-        fullResponse += content;
-        res.write(`data: ${JSON.stringify({ type: 'token', content })}\n\n`);
-        res.flush?.();
+      let text = '';
+      for await (const chunk of completion) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        if (content) {
+          text += content;
+          res.write(`data: ${JSON.stringify({ type: 'token', content })}\n\n`);
+          res.flush?.();
+        }
       }
+      return text;
+    };
+
+    let fullResponse = normalizeMermaidSyntax(await streamCompletion(messages, GROQ_MAX_TOKENS));
+
+    if (needsExpansion(fullResponse)) {
+      const nextStep = Math.max(getStepCount(fullResponse) + 1, 1);
+      res.write(`data: ${JSON.stringify({ type: 'info', message: 'Expanding answer for full article depth...' })}\n\n`);
+      res.flush?.();
+
+      const continuationMessages = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildTopicGuard(message, relevantChunks) },
+        { role: 'user', content: message + '\n\n' + contextText },
+        { role: 'assistant', content: fullResponse },
+        {
+          role: 'user',
+          content: `Continue from **Step ${nextStep}** and complete this as a full long-form technical article.
+Do not repeat previous steps.
+Add missing prerequisites, configuration, validation, exception handling, and testing detail.
+Keep the exact section format (Navigation, Action, Result, Watch Out where needed).
+Target at least ${ARTICLE_MIN_STEPS} total steps and ${ARTICLE_MIN_WORDS} words in the full response.`,
+        },
+      ];
+
+      const extra = await streamCompletion(continuationMessages, GROQ_CONTINUATION_MAX_TOKENS);
+      fullResponse = normalizeMermaidSyntax(`${fullResponse}\n\n${extra}`);
     }
 
     // ── Images + save ──────────────────────────────────────────────────────
@@ -340,6 +415,20 @@ const streamChatResponse = async (req, res) => {
 
   } catch (error) {
     console.error('❌ SSE error:', error);
+    if (error?.status === 429) {
+      const retryAfter = Number(error?.headers?.['retry-after'] || 0);
+      const mins = retryAfter > 0 ? Math.ceil(retryAfter / 60) : null;
+      const msg = mins
+        ? `LLM token quota reached. Try again in about ${mins} minute(s), or lower response size.`
+        : 'LLM token quota reached. Try again shortly or lower response size.';
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        error: msg,
+        code: 'rate_limit_exceeded',
+        retryAfterSeconds: retryAfter || null,
+      })}\n\n`);
+      return res.end();
+    }
     res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
     res.end();
   }
