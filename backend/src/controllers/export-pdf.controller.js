@@ -52,6 +52,46 @@ function renderImageGallery(images) {
   return `<div class="image-grid">${items}</div>`;
 }
 
+function extractPages(text) {
+  const pages = new Set();
+  const pat = /\[Ref:\s*Pages?\s*([\d,\s\-–]+)\]/gi;
+  let m;
+  while ((m = pat.exec(text || '')) !== null) {
+    (m[1].match(/\d+/g) || []).forEach((n) => {
+      const p = parseInt(n, 10);
+      if (Number.isFinite(p) && p > 0) pages.add(p);
+    });
+  }
+  return Array.from(pages);
+}
+
+function splitSteps(text) {
+  const parts = String(text || '').split(/(?=\*\*Step\s+\d+)/gi).filter(Boolean);
+  return parts.length > 1 ? parts : null;
+}
+
+function pickStepImages(stepText, pool, usedSet, limit = 3) {
+  const refs = extractPages(stepText);
+  const scored = pool
+    .filter((img) => !usedSet.has(img.url))
+    .map((img) => {
+      if (!refs.length) return { img, score: 9999 };
+      const distance = Math.min(...refs.map((p) => Math.abs((img.pageNumber || 0) - p)));
+      return { img, score: distance };
+    })
+    .sort((a, b) => a.score - b.score);
+
+  const picked = [];
+  for (const { img, score } of scored) {
+    if ((refs.length && score <= 1) || (!refs.length && picked.length < 1)) {
+      picked.push(img);
+      usedSet.add(img.url);
+    }
+    if (picked.length >= limit) break;
+  }
+  return picked;
+}
+
 function renderStepContent(text) {
   let html = escapeHtml(text || '');
 
@@ -104,8 +144,21 @@ function buildHTML(conversation, messages) {
     if (msg.role === 'user') {
       return `<div class="user-message"><span class="user-label">Question</span>${escapeHtml(msg.content)}</div>`;
     }
-    const msgImages = parseMessageImages(msg.images);
-    return `<div class="assistant-message">${renderStepContent(msg.content)}${renderImageGallery(msgImages)}</div>`;
+    const msgImages = parseMessageImages(msg.images).sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0));
+    const stepParts = splitSteps(msg.content);
+
+    if (!stepParts) {
+      return `<div class="assistant-message">${renderStepContent(msg.content)}${renderImageGallery(msgImages)}</div>`;
+    }
+
+    const used = new Set();
+    const stepHTML = stepParts.map((stepText) => {
+      const stepImgs = pickStepImages(stepText, msgImages, used, 3);
+      return `<section class="step-block">${renderStepContent(stepText)}${renderImageGallery(stepImgs)}</section>`;
+    }).join('');
+
+    const leftover = msgImages.filter((img) => !used.has(img.url));
+    return `<div class="assistant-message">${stepHTML}${renderImageGallery(leftover.slice(0, 6))}</div>`;
   }).join('\n<div class="message-divider"></div>\n');
 
   return `<!doctype html>
@@ -143,6 +196,7 @@ function buildHTML(conversation, messages) {
     .shot img { width: 100%; height: auto; display: block; object-fit: contain; background: #fff; }
     .shot figcaption { font-size: 10px; color: #64748b; font-family: 'JetBrains Mono', monospace; padding: 6px 8px; border-top: 1px solid #e2e8f0; }
     .message-divider { height: 1px; background: #f1f5f9; margin: 40px 0; }
+    .step-block { margin-bottom: 16px; }
     @page { margin: 40px; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>

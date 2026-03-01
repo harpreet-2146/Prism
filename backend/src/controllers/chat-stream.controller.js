@@ -15,8 +15,8 @@ const GROQ_MODEL     = process.env.GROQ_MODEL          || 'llama-3.3-70b-versati
 const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '9000', 10);
 const GROQ_TEMP      = parseFloat(process.env.GROQ_TEMPERATURE || '0.3');
 const GROQ_CONTINUATION_MAX_TOKENS = parseInt(process.env.GROQ_CONTINUATION_MAX_TOKENS || '6000', 10);
-const ARTICLE_MIN_STEPS = parseInt(process.env.ARTICLE_MIN_STEPS || '14', 10);
-const ARTICLE_MIN_WORDS = parseInt(process.env.ARTICLE_MIN_WORDS || '2200', 10);
+const ARTICLE_MIN_STEPS = parseInt(process.env.ARTICLE_MIN_STEPS || '16', 10);
+const ARTICLE_MIN_WORDS = parseInt(process.env.ARTICLE_MIN_WORDS || '2800', 10);
 const TAVILY_DEPTH   = process.env.TAVILY_SEARCH_DEPTH  || 'advanced';
 const TAVILY_MAX     = parseInt(process.env.TAVILY_MAX_RESULTS || '3', 10);
 const EMBED_TOP_K    = 20; // Retrieve more chunks — POSC spans many pages
@@ -152,16 +152,27 @@ const SYSTEM_PROMPT = `You are PRISM, an SAP documentation expert producing a de
 OUTPUT REQUIREMENTS — THESE ARE MANDATORY, NOT OPTIONAL
 ═══════════════════════════════════════════════════════
 
-LENGTH: Your response MUST cover the topic exhaustively. For process/configuration questions, minimum 10 steps, target 12–18 steps based on topic complexity. A 4-step answer is usually incomplete.
+LENGTH: Your response MUST cover the topic exhaustively. For process/configuration questions, minimum 14 steps, target 16–24 steps based on topic complexity. A 4-step answer is incomplete.
 
 STRUCTURE: Every step uses EXACTLY this format — no exceptions, no shortcuts:
 
 **Step N: [Precise descriptive title]**
 
-Navigation: [Full menu path using > separator] (T-code: XXXX if applicable) [Ref: Page X]
+Navigation: [Exact click-path breadcrumb using > separator from entrypoint to final screen, e.g. "SAP Easy Access > Logistics > Warehouse Management > ..."] (T-code: XXXX if applicable) [Ref: Page X]
 
 Action:
-[Numbered list of exact actions — every field name, every value, every button click, every dropdown selection. Be explicit: "In the 'Warehouse Number' field, enter '0001'. Click the dropdown next to 'Process Category' and select '01 – Inbound Delivery'."]
+[Numbered micro-steps only. Every line is one concrete UI operation. Include ALL of the following where applicable:
+ - where to click
+ - exact tab/section/panel name
+ - exact field label
+ - exact value to enter/select
+ - exact button/action to press
+Use imperative walkthrough language like a live demo:
+"Click **SPRO** in SAP Easy Access."
+"In **Warehouse Number**, type \`0001\`."
+"Open dropdown for **Process Category** and select \`01 - Inbound Delivery\`."
+"Click **Save** (Ctrl+S)."
+Minimum 8 micro-steps per major configuration step.]
 
 Result:
 [Exact screen state after this step. What message appears. What changes. What new fields become available. What the screen title becomes.]
@@ -178,7 +189,10 @@ SYSTEM-ORIENTED EXECUTION MODE:
   2) exact field labels,
   3) exact values to type/select,
   4) exact button/action to click.
-- Do not write generic instructions such as "configure the settings", "fill required fields", or "proceed accordingly".
+- Do not write generic instructions such as "configure the settings", "fill required fields", "navigate to", or "proceed accordingly".
+- Never compress multiple clicks into one sentence when separate clicks are required.
+- If a step requires moving between screens, list each screen transition explicitly.
+- If the action occurs on web/Fiori, include app launch path and tile/app name before field edits.
 - If using inferred details beyond source text, still provide concrete values/examples and mark source ref lines where available.
 - For each step, include a verifiable Result (status message/screen/table change) that proves completion.
 
