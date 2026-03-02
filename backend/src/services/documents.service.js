@@ -11,8 +11,6 @@ const embeddingSearch = require('./vector/embedding-search.service');
 
 const prisma = new PrismaClient();
 
-const OUTPUTS_DIR = path.resolve(__dirname, '../../../python-service/data/outputs');
-
 class DocumentsService {
   async uploadDocument(file, userId) {
     try {
@@ -192,7 +190,7 @@ class DocumentsService {
 
       const batchPayload = batch.map(img => ({
         id: img.id,
-        path: path.join(OUTPUTS_DIR, path.basename(img.storagePath)).replace(/\\/g, '/')
+        path: (img.storagePath || '').replace(/\\/g, '/')
       }));
 
       try {

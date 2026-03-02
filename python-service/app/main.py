@@ -8,9 +8,11 @@ FastAPI entry point for PDF processing, OCR, and embeddings
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
 import time
 import logging
+from pathlib import Path
 
 from app.config import settings
 from app.utils.logger import setup_logging, get_logger
@@ -74,6 +76,11 @@ app.include_router(health.router, tags=["Health"])
 app.include_router(pdf_routes.router, prefix="/api/pdf", tags=["PDF"])
 app.include_router(ocr_routes.router, prefix="/api/ocr", tags=["OCR"])
 app.include_router(embedding_routes.router, prefix="/api/embeddings", tags=["Embeddings"])
+
+# Static outputs for extracted images
+outputs_dir = Path(settings.OUTPUT_DIR)
+outputs_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(outputs_dir)), name="outputs")
 
 # Prometheus metrics
 if settings.ENABLE_METRICS:

@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.env.development
+.env.production
+uploads
+exports
+logs
+.git
+.github
+coverage
+*.md

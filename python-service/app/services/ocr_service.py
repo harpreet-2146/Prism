@@ -133,10 +133,9 @@ class OCRService:
     def _tesseract_single(self, image_path: str, image_id: str) -> Dict:
         start = time.time()
         try:
-            if not Path(image_path).exists():
-                raise FileNotFoundError(f"Image not found: {image_path}")
+            resolved_path = self._resolve_image_path(image_path)
 
-            image = Image.open(image_path)
+            image = Image.open(resolved_path)
 
             # --psm 6 = uniform block of text (best for SAP UI screenshots)
             # --oem 3 = default engine (LSTM)
@@ -165,13 +164,31 @@ class OCRService:
             logger.warning(f"Tesseract failed for {image_id}, trying EasyOCR: {e}")
             return self._easyocr_single(image_path, image_id)
 
+    def _resolve_image_path(self, image_path: str) -> Path:
+        """
+        Resolve OCR input path for both deployment modes:
+        - absolute/full path (legacy local mode)
+        - filename or relative storage_path from DB (Render split-services mode)
+        """
+        candidate = Path(image_path)
+        if candidate.exists():
+            return candidate
+
+        if not candidate.is_absolute():
+            fallback = Path(settings.OUTPUT_DIR) / candidate.name
+            if fallback.exists():
+                return fallback
+
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
     # ── EASYOCR FALLBACK ──────────────────────────────────────────────────────
 
     def _easyocr_single(self, image_path: str, image_id: str) -> Dict:
         start = time.time()
         try:
             import numpy as np
-            image = Image.open(image_path)
+            resolved_path = self._resolve_image_path(image_path)
+            image = Image.open(resolved_path)
             results = self.easyocr_reader.readtext(np.array(image))
             texts = [t for (_, t, c) in results if c > 0.3]
             confs = [c for (_, _, c) in results if c > 0.3]

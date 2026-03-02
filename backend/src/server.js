@@ -7,6 +7,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
+const axios = require('axios');
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 
@@ -94,10 +95,52 @@ const uploadsPath = path.join(__dirname, '../uploads');
 app.use('/uploads', express.static(uploadsPath));
 console.log('✅ Static uploads folder:', uploadsPath);
 
-// Serve extracted PDF images (page renders + embedded images from Python service)
+// Serve extracted PDF images:
+// - local path when services run together
+// - proxy to Python service when deployed separately (e.g. Render)
 const outputsPath = path.resolve(__dirname, '../../python-service/data/outputs');
-app.use('/outputs', express.static(outputsPath));
-console.log('✅ Static outputs folder:', outputsPath);
+app.get('/outputs/:filename', async (req, res) => {
+  const filename = path.basename(req.params.filename || '');
+  if (!filename) {
+    return res.status(400).json({ success: false, error: 'Invalid filename' });
+  }
+
+  const localFile = path.join(outputsPath, filename);
+  return res.sendFile(localFile, async (err) => {
+    if (!err) return;
+
+    if (!config.PYTHON_SERVICE_URL) {
+      return res.status(404).json({ success: false, error: 'Image not found' });
+    }
+
+    try {
+      const base = config.PYTHON_SERVICE_URL.replace(/\/+$/, '');
+      const targetUrl = `${base}/outputs/${encodeURIComponent(filename)}`;
+      const proxy = await axios.get(targetUrl, {
+        responseType: 'stream',
+        timeout: 20000,
+        validateStatus: () => true
+      });
+
+      if (proxy.status >= 400) {
+        return res.status(proxy.status).json({ success: false, error: 'Image not found' });
+      }
+
+      if (proxy.headers['content-type']) {
+        res.setHeader('Content-Type', proxy.headers['content-type']);
+      }
+
+      return proxy.data.pipe(res);
+    } catch (proxyError) {
+      logger.warn('Failed to proxy output image', {
+        filename,
+        error: proxyError.message
+      });
+      return res.status(502).json({ success: false, error: 'Failed to fetch image' });
+    }
+  });
+});
+console.log('✅ Outputs route configured (local + Python proxy fallback):', outputsPath);
 
 // ================================================================
 // API ROUTES
