@@ -92,8 +92,9 @@ class PythonClientService {
         TIMEOUT.IMAGES
       );
       if (!response.success) throw new Error('Image extraction returned failure');
-      console.log(`[PythonClient] Images extracted: ${response.data.data.count}`);
-      return response.data.data.images;
+      const status = response?.data?.status || 'unknown';
+      console.log(`[PythonClient] Image extraction request accepted: ${status}`);
+      return [];
     } catch (error) {
       throw new Error(`Python image extraction failed: ${error.message}`);
     }

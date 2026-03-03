@@ -2,7 +2,7 @@
 PDF Processing API Routes
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 import logging
 from pathlib import Path
 import shutil
@@ -14,6 +14,19 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _extract_images_job(document_id: str, temp_pdf_path: str) -> None:
+    """Run extraction + DB insert off the request thread, then clean temp file."""
+    temp_path = Path(temp_pdf_path)
+    try:
+        word_counts = pdf_processor.get_word_counts(str(temp_path))
+        image_service.extract_all_images(str(temp_path), document_id, word_counts)
+        logger.info(f"Background image extraction completed for document {document_id}")
+    except Exception as e:
+        logger.error(f"Background image extraction failed for {document_id}: {e}")
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @router.post("/process")
@@ -48,8 +61,9 @@ async def process_pdf(
             temp_path.unlink(missing_ok=True)
 
 
-@router.post("/extract-images")
+@router.post("/extract-images", status_code=202)
 async def extract_images(
+    background_tasks: BackgroundTasks,
     document_id: str = Form(...),
     file: UploadFile = File(...)
 ):
@@ -58,37 +72,38 @@ async def extract_images(
     1. Render pages with minimal text as images (for OCR)
     2. Extract embedded images (diagrams, charts)
     """
-    temp_path = None
     try:
+        # Validate basic input before accepting async processing
+        if not document_id.strip():
+            raise HTTPException(status_code=400, detail="document_id is required")
+
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="file is required")
+
         suffix = Path(file.filename or "").suffix or ".pdf"
+        if suffix.lower() != ".pdf":
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
         temp_path = Path(settings.TEMP_DIR) / f"{document_id}_{uuid4().hex}{suffix}"
 
         with temp_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        word_counts = pdf_processor.get_word_counts(str(temp_path))
-
-        images = image_service.extract_all_images(
-            str(temp_path),
-            document_id,
-            word_counts
-        )
+        background_tasks.add_task(_extract_images_job, document_id, str(temp_path))
 
         return {
             "success": True,
             "data": {
                 "document_id": document_id,
-                "images": images,
-                "count": len(images)
+                "status": "accepted"
             }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Image extraction failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
 
 
 @router.post("/upload")
