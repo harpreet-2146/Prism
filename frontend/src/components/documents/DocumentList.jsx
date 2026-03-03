@@ -35,73 +35,60 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
                 {formatDistanceToNow(new Date(doc.createdAt), { addSuffix: true })}
               </p>
 
-              {/* Status Indicator */}
-              <div className="mt-3">
-                <div className="mb-2 text-xs text-gray-500">
-                  <span className="font-medium">Status:</span> {doc.status || 'unknown'} {' • '}
-                  <span className="font-medium">Embeddings:</span> {doc.embeddingStatus || 'unknown'} {' • '}
-                  <span className="font-medium">Images:</span> {doc.imageCount ?? 0}
-                </div>
-                {doc.status === 'pending' && (
-                  <div className="flex items-center text-yellow-600">
-                    <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
-                    <span className="text-sm">Queued for processing...</span>
-                  </div>
-                )}
+	              {/* Status Indicator */}
+	              <div className="mt-3">
+	                <div className="mb-2 text-xs text-gray-500">
+	                  <span className="font-medium">Status:</span> {doc.status || 'unknown'} {' • '}
+	                  <span className="font-medium">Embeddings:</span> {doc.embeddingStatus || 'unknown'} {' • '}
+	                  <span className="font-medium">Images:</span> {doc.imageCount ?? 0}
+	                </div>
 
-                {doc.status === 'processing' && (
-                  <div>
-                    <div className="flex items-center text-blue-600 mb-2">
-                      <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
-                      <span className="text-sm font-medium">Processing...</span>
-                    </div>
-                    
-                    {/* Progress Bar */}
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div
-                        className="bg-blue-600 h-2 rounded-full transition-all"
-                        style={{ width: `${calculateProgress(doc)}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Extracting text and images, running OCR, creating embeddings...
-                    </p>
-                  </div>
-                )}
+	                {isProcessingForChat(doc) && (
+	                  <div>
+	                    <div className="flex items-center text-blue-600 mb-2">
+	                      <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
+	                      <span className="text-sm font-medium">Processing...</span>
+	                    </div>
+	                    <div className="w-full bg-gray-200 rounded-full h-2">
+	                      <div
+	                        className="bg-blue-600 h-2 rounded-full transition-all"
+	                        style={{ width: `${calculateProgress(doc)}%` }}
+	                      />
+	                    </div>
+	                  </div>
+	                )}
 
-                {isReadyToChat(doc) ? (
-                  <div className="flex items-center text-green-600">
-                    <CheckCircle className="w-4 h-4 mr-2" />
-                    <span className="text-sm">Ready to chat!</span>
-                  </div>
-                ) : isFinalizing(doc) ? (
-                  <div>
-                    <div className="flex items-center text-blue-600 mb-2">
-                      <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
-                      <span className="text-sm font-medium">Finalizing...</span>
-                    </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div
-                        className="bg-blue-600 h-2 rounded-full transition-all"
-                        style={{ width: `${calculateProgress(doc)}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Preparing document for chat...
-                    </p>
-                  </div>
-                ) : null}
+	                {doc.status === 'pending' && (
+	                  <div className="flex items-center text-yellow-600">
+	                    <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
+	                    <span className="text-sm">Queued for processing...</span>
+	                  </div>
+	                )}
 
-                {doc.status === 'failed' && (
+	                {isReadyToChat(doc) ? (
+	                  <div className="flex items-center text-green-600">
+	                    <CheckCircle className="w-4 h-4 mr-2" />
+	                    <span className="text-sm">Ready to chat!</span>
+	                  </div>
+	                ) : null}
+
+	                {doc.status === 'failed' && (
                   <div className="flex items-center text-red-600">
                     <AlertCircle className="w-4 h-4 mr-2" />
                     <span className="text-sm">Processing failed</span>
                     {doc.processingError && (
                       <span className="text-xs ml-2">({doc.processingError})</span>
                     )}
-                  </div>
-                )}
-              </div>
+	                  </div>
+	                )}
+
+	                <div className="mt-3 space-y-1 text-xs text-gray-600">
+	                  <div><span className="font-medium">Text Extraction:</span> {getTextExtractionLabel(doc)}</div>
+	                  <div><span className="font-medium">Embeddings:</span> {getEmbeddingsLabel(doc)}</div>
+	                  <div>{getScreensLabel(doc)}</div>
+	                  <div><span className="font-medium">OCR:</span> {getOCRLabel(doc)}</div>
+	                </div>
+	              </div>
 
               {/* Stats */}
               {isReadyToChat(doc) && (
@@ -138,28 +125,55 @@ function calculateProgress(doc) {
   
   let progress = 0;
   
-  if (doc.status === 'processing' || doc.status === 'completed') progress += 35;
+  if (doc.status === 'processing' || doc.status === 'completed') progress += 40;
   if (doc.imageCount > 0) progress += 30;
-  if (doc.embeddingStatus === 'processing') progress += 15;
+  if (doc.embeddingStatus === 'processing') progress += 10;
   if (doc.embeddingStatus === 'completed') progress += 20;
   
   return Math.min(progress, 95);
 }
 
-function isFinalizing(doc) {
+function isProcessingForChat(doc) {
   return (
-    doc.status === 'completed' &&
-    doc.embeddingStatus !== 'failed' &&
-    !isReadyToChat(doc)
+    !isReadyToChat(doc) &&
+    doc.status !== 'failed' &&
+    doc.embeddingStatus !== 'failed'
   );
 }
 
 function isReadyToChat(doc) {
   const statusDone = doc.status === 'completed';
   const embeddingDone = doc.embeddingStatus === 'completed';
-  const hasExtractedImages = (doc._count?.images || 0) > 0;
-  const imageReady = !hasExtractedImages || (doc.imageCount || 0) > 0;
-  return statusDone && embeddingDone && imageReady;
+  return statusDone && embeddingDone;
+}
+
+function getTextExtractionLabel(doc) {
+  if (doc.status === 'failed') return 'Failed';
+  if (doc.status === 'completed') return 'Completed';
+  if (doc.status === 'processing') return 'In Progress';
+  return 'Pending';
+}
+
+function getEmbeddingsLabel(doc) {
+  if (doc.embeddingStatus === 'failed') return 'Failed';
+  if (doc.embeddingStatus === 'completed') return 'Completed';
+  if (doc.embeddingStatus === 'processing') return 'In Progress';
+  return 'Pending';
+}
+
+function getScreensLabel(doc) {
+  if ((doc.imageCount || 0) > 0) return `Screens: ${doc.imageCount}`;
+  return 'Extracting Screens...';
+}
+
+function getOCRLabel(doc) {
+  const images = Array.isArray(doc.images) ? doc.images : [];
+  if (!images.length) return 'Waiting for screens';
+
+  const completed = images.filter((img) => img.ocrStatus === 'completed').length;
+  if (completed >= images.length) return `Completed (${completed}/${images.length})`;
+  if (completed > 0) return `In Progress (${completed}/${images.length})`;
+  return `Pending (0/${images.length})`;
 }
 
 export default DocumentList;
