@@ -40,7 +40,7 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
 	                <div className="mb-2 text-xs text-gray-500">
 	                  <span className="font-medium">Status:</span> {doc.status || 'unknown'} {' • '}
 	                  <span className="font-medium">Embeddings:</span> {doc.embeddingStatus || 'unknown'} {' • '}
-	                  <span className="font-medium">Images:</span> {doc.imageCount ?? 0}
+	                  <span className="font-medium">Images:</span> {getLiveImageCount(doc)}
 	                </div>
 
 	                {isProcessingForChat(doc) && (
@@ -162,7 +162,8 @@ function getEmbeddingsLabel(doc) {
 }
 
 function getScreensLabel(doc) {
-  if ((doc.imageCount || 0) > 0) return `Screens: ${doc.imageCount}`;
+  const liveImageCount = getLiveImageCount(doc);
+  if (liveImageCount > 0) return `Screens: ${liveImageCount}`;
   return 'Extracting Screens...';
 }
 
@@ -174,6 +175,13 @@ function getOCRLabel(doc) {
   if (completed >= images.length) return `Completed (${completed}/${images.length})`;
   if (completed > 0) return `In Progress (${completed}/${images.length})`;
   return `Pending (0/${images.length})`;
+}
+
+function getLiveImageCount(doc) {
+  const directImageCount = Number(doc?.imageCount || 0);
+  const relatedImageCount = Array.isArray(doc?.images) ? doc.images.length : 0;
+  const countedImages = Number(doc?._count?.images || 0);
+  return Math.max(directImageCount, relatedImageCount, countedImages);
 }
 
 export default DocumentList;
