@@ -2,6 +2,7 @@
 'use strict';
 
 const axios = require('axios');
+const fs = require('fs').promises;
 
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || "http://localhost:8000";
 
@@ -24,28 +25,73 @@ class PythonClientService {
     return response.data;
   }
 
-  async processPDF(documentId, pdfPath) {
+  async _postPdfMultipart(endpoint, documentId, filePath, originalName, mimeType, timeoutMs) {
+    const fileBuffer = await fs.readFile(filePath);
+    const form = new FormData();
+    form.append('document_id', documentId);
+    form.append(
+      'file',
+      new Blob([fileBuffer], { type: mimeType || 'application/pdf' }),
+      originalName || 'document.pdf'
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-      const response = await axios.post(
-        `${this.baseURL}/api/pdf/process`,
-        { document_id: documentId, pdf_path: pdfPath },
-        { timeout: TIMEOUT.PDF_TEXT, headers: { 'Content-Type': 'application/json' } }
+      const response = await fetch(`${this.baseURL}${endpoint}`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal
+      });
+
+      const responseText = await response.text();
+      let payload = {};
+      try {
+        payload = responseText ? JSON.parse(responseText) : {};
+      } catch (_) {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        const detail = payload?.detail || payload?.error || responseText || `HTTP ${response.status}`;
+        throw new Error(detail);
+      }
+
+      return payload;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async processPDF(documentId, filePath, originalName, mimeType) {
+    try {
+      const response = await this._postPdfMultipart(
+        '/api/pdf/process',
+        documentId,
+        filePath,
+        originalName,
+        mimeType,
+        TIMEOUT.PDF_TEXT
       );
-      if (!response.data.success) throw new Error('PDF processing returned failure');
-      return response.data.data;
+      if (!response.success) throw new Error('PDF processing returned failure');
+      return response.data;
     } catch (error) {
       throw new Error(`Python PDF processing failed: ${error.message}`);
     }
   }
 
-  async extractImages(documentId, pdfPath) {
+  async extractImages(documentId, filePath, originalName, mimeType) {
     try {
-      const response = await axios.post(
-        `${this.baseURL}/api/pdf/extract-images`,
-        { document_id: documentId, pdf_path: pdfPath },
-        { timeout: TIMEOUT.IMAGES, headers: { 'Content-Type': 'application/json' }, maxContentLength: Infinity, maxBodyLength: Infinity }
+      const response = await this._postPdfMultipart(
+        '/api/pdf/extract-images',
+        documentId,
+        filePath,
+        originalName,
+        mimeType,
+        TIMEOUT.IMAGES
       );
-      if (!response.data.success) throw new Error('Image extraction returned failure');
+      if (!response.success) throw new Error('Image extraction returned failure');
       console.log(`[PythonClient] Images extracted: ${response.data.data.count}`);
       return response.data.data.images;
     } catch (error) {
