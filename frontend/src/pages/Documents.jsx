@@ -5,7 +5,7 @@ import { Skeleton } from '@components/ui/skeleton';
 import { FileText } from 'lucide-react';
 
 export default function Documents() {
-  const { documents, loading, deleteDocument } = useDocuments();
+  const { documents, loading, deleteDocument, uploadDocument, isUploading } = useDocuments();
 
   return (
     <div className="h-full overflow-y-auto bg-background">
@@ -20,7 +20,7 @@ export default function Documents() {
 
         {/* Upload section */}
         <div className="mb-8">
-          <DocumentUpload />
+          <DocumentUpload uploadDocument={uploadDocument} isUploading={isUploading} />
         </div>
 
         {/* Documents list */}
