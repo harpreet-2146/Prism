@@ -12,6 +12,21 @@ const embeddingSearch = require('./vector/embedding-search.service');
 const prisma = new PrismaClient();
 
 class DocumentsService {
+  async _insertEmbeddingsInBatches(embeddings, vectors, batchSize = 40) {
+    if (!embeddings.length) return;
+    if (embeddings.length !== vectors.length) {
+      throw new Error('Embedding payload mismatch: embeddings and vectors length differ');
+    }
+
+    for (let i = 0; i < embeddings.length; i += batchSize) {
+      const chunk = embeddings.slice(i, i + batchSize).map((emb, offset) => ({
+        ...emb,
+        embedding: vectors[i + offset]
+      }));
+      await prisma.embedding.createMany({ data: chunk });
+    }
+  }
+
   async uploadDocument(file, userId) {
     try {
       logger.info('Starting document upload', {
@@ -156,9 +171,7 @@ class DocumentsService {
 
       if (textEmbeddings.length > 0) {
         const vectors = await pythonClient.generateEmbeddings(textEmbeddings.map(e => e.text));
-        await Promise.all(
-          textEmbeddings.map((emb, i) => prisma.embedding.create({ data: { ...emb, embedding: vectors[i] } }))
-        );
+        await this._insertEmbeddingsInBatches(textEmbeddings, vectors);
         logger.info('Text embeddings saved', { documentId, count: vectors.length, component: 'documents-service' });
       }
 
@@ -251,9 +264,7 @@ class DocumentsService {
       }));
 
       const ocrVectors = await pythonClient.generateEmbeddings(ocrEmbeddings.map(e => e.text));
-      await Promise.all(
-        ocrEmbeddings.map((emb, i) => prisma.embedding.create({ data: { ...emb, embedding: ocrVectors[i] } }))
-      );
+      await this._insertEmbeddingsInBatches(ocrEmbeddings, ocrVectors);
 
       logger.info('OCR embeddings saved', { documentId, count: ocrEmbeddings.length, component: 'documents-service' });
     }
