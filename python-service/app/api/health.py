@@ -32,12 +32,13 @@ async def detailed_health_check():
         logger.error(f"Tesseract check failed: {e}")
     
     embedding_healthy = False
+    embedding_provider = "voyage-ai"
     try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer(settings.EMBEDDING_MODEL)
-        embedding_healthy = True
+        from app.services.embedding_service import embedding_service
+        embedding_health = embedding_service.health_check()
+        embedding_healthy = embedding_health.get("available", False)
     except Exception as e:
-        logger.error(f"Embedding model check failed: {e}")
+        logger.error(f"Embedding service check failed: {e}")
     
     overall_status = "healthy" if all([
         db_healthy,
@@ -60,7 +61,8 @@ async def detailed_health_check():
             },
             "embedding_model": {
                 "status": "healthy" if embedding_healthy else "unhealthy",
-                "model": settings.EMBEDDING_MODEL
+                "model": settings.VOYAGE_MODEL,
+                "provider": embedding_provider
             }
         }
     }

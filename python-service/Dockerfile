@@ -4,29 +4,31 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies
+# System dependencies:
+# - tesseract-ocr + tesseract-ocr-eng for OCR
+# - libgl1/libglib2 needed by Pillow/OpenCV runtime used by EasyOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
+    tesseract-ocr-eng \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender1 \
     libgomp1 \
-    gcc \
-    g++ \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Upgrade pip first (important for large ML installs)
-RUN pip install --upgrade pip
+# Upgrade packaging tooling for smoother dependency resolution
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Install Python dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application source
 COPY app ./app
 COPY .env.example ./
 
@@ -45,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=5 \
   CMD curl -f http://127.0.0.1:${PORT:-8000}/health || exit 1
 
 # Start server
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-2}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --workers ${WORKERS:-2}"]
