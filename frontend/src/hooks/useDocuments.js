@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { documentsAPI } from '../lib/api';
 
+const isCompleted = (value) => value === 'completed';
+const isFailed = (value) => value === 'failed';
+
 export const useDocuments = () => {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -48,7 +51,14 @@ export const useDocuments = () => {
           prev.map(doc => doc.id === documentId ? updatedDoc : doc)
         );
 
-        if (updatedDoc.status === 'completed' || updatedDoc.status === 'failed') {
+        const done =
+          isCompleted(updatedDoc.status) &&
+          isCompleted(updatedDoc.embeddingStatus);
+        const failed =
+          isFailed(updatedDoc.status) ||
+          isFailed(updatedDoc.embeddingStatus);
+
+        if (done || failed) {
           clearInterval(interval);
           delete pollingIntervalsRef.current[documentId];
           console.log('✅ Stopped polling for document:', documentId);
@@ -175,7 +185,11 @@ export const useDocuments = () => {
     }
 
     const processingDocs = documents.filter(
-      doc => doc.status === 'pending' || doc.status === 'processing'
+      (doc) => (
+        (!isCompleted(doc.status) || !isCompleted(doc.embeddingStatus)) &&
+        !isFailed(doc.status) &&
+        !isFailed(doc.embeddingStatus)
+      )
     );
 
     processingDocs.forEach(doc => {
