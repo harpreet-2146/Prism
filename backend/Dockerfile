@@ -55,4 +55,4 @@ RUN mkdir -p /app/uploads /app/exports /app/logs
 EXPOSE 5000
 
 # -------- Start application --------
-CMD ["sh", "-c", "node src/server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node src/server.js"]
