@@ -37,6 +37,11 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
 
               {/* Status Indicator */}
               <div className="mt-3">
+                <div className="mb-2 text-xs text-gray-500">
+                  <span className="font-medium">Status:</span> {doc.status || 'unknown'} {' • '}
+                  <span className="font-medium">Embeddings:</span> {doc.embeddingStatus || 'unknown'} {' • '}
+                  <span className="font-medium">Images:</span> {doc.imageCount ?? 0}
+                </div>
                 {doc.status === 'pending' && (
                   <div className="flex items-center text-yellow-600">
                     <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
@@ -64,12 +69,28 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
                   </div>
                 )}
 
-                {doc.status === 'completed' && (
+                {isReadyToChat(doc) ? (
                   <div className="flex items-center text-green-600">
                     <CheckCircle className="w-4 h-4 mr-2" />
                     <span className="text-sm">Ready to chat!</span>
                   </div>
-                )}
+                ) : isFinalizing(doc) ? (
+                  <div>
+                    <div className="flex items-center text-blue-600 mb-2">
+                      <Loader2 className="animate-spin rounded-full h-4 w-4 mr-2" />
+                      <span className="text-sm font-medium">Finalizing...</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2">
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all"
+                        style={{ width: `${calculateProgress(doc)}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Preparing document for chat...
+                    </p>
+                  </div>
+                ) : null}
 
                 {doc.status === 'failed' && (
                   <div className="flex items-center text-red-600">
@@ -83,7 +104,7 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
               </div>
 
               {/* Stats */}
-              {doc.status === 'completed' && (
+              {isReadyToChat(doc) && (
                 <div className="mt-3 flex gap-4 text-xs text-gray-600">
                   <div>
                     <span className="font-medium">Embeddings:</span> {doc._count?.embeddings || 0}
@@ -112,17 +133,33 @@ const DocumentList = ({ documents = [], loading = false, onDelete }) => {
 
 // Helper function to estimate progress
 function calculateProgress(doc) {
-  if (doc.status === 'completed') return 100;
-  if (doc.status === 'failed') return 0;
+  if (isReadyToChat(doc)) return 100;
+  if (doc.status === 'failed' || doc.embeddingStatus === 'failed') return 0;
   
   let progress = 0;
   
-  if (doc.textContent) progress += 25;
-  if (doc.imageCount > 0) progress += 25;
-  if (doc.embeddingStatus === 'processing') progress += 25;
-  if (doc.embeddingStatus === 'completed') progress += 25;
+  if (doc.status === 'processing' || doc.status === 'completed') progress += 35;
+  if (doc.imageCount > 0) progress += 30;
+  if (doc.embeddingStatus === 'processing') progress += 15;
+  if (doc.embeddingStatus === 'completed') progress += 20;
   
   return Math.min(progress, 95);
+}
+
+function isFinalizing(doc) {
+  return (
+    doc.status === 'completed' &&
+    doc.embeddingStatus !== 'failed' &&
+    !isReadyToChat(doc)
+  );
+}
+
+function isReadyToChat(doc) {
+  const statusDone = doc.status === 'completed';
+  const embeddingDone = doc.embeddingStatus === 'completed';
+  const hasExtractedImages = (doc._count?.images || 0) > 0;
+  const imageReady = !hasExtractedImages || (doc.imageCount || 0) > 0;
+  return statusDone && embeddingDone && imageReady;
 }
 
 export default DocumentList;
