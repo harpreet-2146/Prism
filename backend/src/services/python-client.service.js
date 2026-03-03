@@ -3,7 +3,7 @@
 
 const axios = require('axios');
 
-const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8000';
+const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || "http://localhost:8000";
 
 const TIMEOUT = {
   HEALTH:     5_000,
