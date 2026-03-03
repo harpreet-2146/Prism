@@ -36,9 +36,9 @@ app.use(helmet({
 
 // CORS
 app.use(cors({
-  origin: config.FRONTEND_URL || 'http://localhost:5173',
+  origin: 'https://prism-g5y3.onrender.com',
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
