@@ -6,6 +6,18 @@ import { documentsAPI } from '../lib/api';
 const isCompleted = (value) => value === 'completed';
 const isFailed = (value) => value === 'failed';
 
+const normalizeDocumentState = (doc) => {
+  if (!doc || typeof doc !== 'object') return doc;
+  const directImageCount = Number(doc.imageCount || 0);
+  const relatedImageCount = Array.isArray(doc.images) ? doc.images.length : 0;
+  const countedImages = Number(doc?._count?.images || 0);
+  const liveImageCount = Math.max(directImageCount, relatedImageCount, countedImages);
+  return {
+    ...doc,
+    imageCount: liveImageCount,
+  };
+};
+
 export const useDocuments = () => {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -26,7 +38,10 @@ export const useDocuments = () => {
       const documentsData = response.data.data?.documents || response.data.data || [];
       
       console.log('📚 Fetched documents:', documentsData);
-      setDocuments(Array.isArray(documentsData) ? documentsData : []);
+      const normalizedDocuments = Array.isArray(documentsData)
+        ? documentsData.map(normalizeDocumentState)
+        : [];
+      setDocuments(normalizedDocuments);
     } catch (err) {
       console.error('Failed to fetch documents:', err);
       setError(err.response?.data?.error || 'Failed to load documents');
@@ -45,7 +60,7 @@ export const useDocuments = () => {
     const interval = setInterval(async () => {
       try {
         const response = await documentsAPI.getById(documentId);
-        const updatedDoc = response.data.data;
+        const updatedDoc = normalizeDocumentState(response.data.data);
 
         setDocuments(prev =>
           prev.map(doc => doc.id === documentId ? updatedDoc : doc)
@@ -111,9 +126,14 @@ export const useDocuments = () => {
       });
 
       const newDocument = uploadResponse.data.data;
+      const latestResponse = await documentsAPI.getById(newDocument.id);
+      const liveDocument = normalizeDocumentState(latestResponse.data.data);
 
-      // ✅ Add document to state immediately
-      setDocuments(prev => [newDocument, ...prev]);
+      // Use canonical API document state as the only source of truth
+      setDocuments(prev => {
+        const withoutOld = prev.filter(doc => doc.id !== liveDocument.id);
+        return [liveDocument, ...withoutOld];
+      });
 
       // ✅ Start polling for status updates
       pollDocumentStatus(newDocument.id);
