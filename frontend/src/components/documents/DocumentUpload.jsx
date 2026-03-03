@@ -1,12 +1,12 @@
 // frontend/src/components/documents/DocumentUpload.jsx
 import { useState } from 'react';
-import { useDocuments } from '@hooks/useDocuments';
+import { useNavigate } from 'react-router-dom';
 import { Upload, File, X, AlertCircle } from 'lucide-react';
 import { Button } from '@components/ui/button';
 
-const DocumentUpload = () => {
+const DocumentUpload = ({ uploadDocument, isUploading }) => {
   // ✅ ALL HOOKS AT THE TOP - BEFORE ANY CONDITIONALS OR HANDLERS
-  const { uploadDocument, isUploading } = useDocuments();
+  const navigate = useNavigate();
   
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -60,6 +60,7 @@ const DocumentUpload = () => {
     // ✅ Success - clear the upload box
     setSelectedFile(null);
     setUploadProgress(0);
+    navigate('/documents');
     
     // ✅ The document is now in the list via polling
     // No need to do anything else!
