@@ -105,7 +105,7 @@ const config = {
   TAVILY_MAX_RESULTS:  optionalInt('TAVILY_MAX_RESULTS', 3),
 
   // ---- Python Microservice ----
-  PYTHON_SERVICE_URL:     optionalEnv('PYTHON_SERVICE_URL'),
+  PYTHON_SERVICE_URL:     optionalEnv('PYTHON_SERVICE_URL', process.env.PYTHON_SERVICE_URL || "http://localhost:8000"),
   PYTHON_SERVICE_API_KEY: optionalEnv('PYTHON_SERVICE_API_KEY'),
   PYTHON_SERVICE_TIMEOUT: optionalInt('PYTHON_SERVICE_TIMEOUT', 60000),
 
