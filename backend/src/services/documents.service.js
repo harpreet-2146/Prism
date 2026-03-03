@@ -35,7 +35,7 @@ class DocumentsService {
         }
       });
 
-      this._processDocument(document.id, userId, file.path).catch(error => {
+      this._processDocument(document.id, userId, file).catch(error => {
         logger.error('Document processing failed', {
           documentId: document.id, error: error.message, stack: error.stack, component: 'documents-service'
         });
@@ -49,18 +49,23 @@ class DocumentsService {
     }
   }
 
-  async _processDocument(documentId, userId, filePath) {
+  async _processDocument(documentId, userId, file) {
     try {
       await prisma.document.update({ where: { id: documentId }, data: { status: 'processing' } });
 
-      const normalizedPath = (path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(process.cwd(), filePath)
+      const normalizedPath = (path.isAbsolute(file.path)
+        ? file.path
+        : path.resolve(process.cwd(), file.path)
       ).replace(/\\/g, '/');
 
       // STEP 1: Extract PDF text
       logger.info('Step 1: Extracting PDF text', { documentId, component: 'documents-service' });
-      const pdfResult = await pythonClient.processPDF(documentId, normalizedPath);
+      const pdfResult = await pythonClient.processPDF(
+        documentId,
+        normalizedPath,
+        file.originalname,
+        file.mimetype
+      );
 
       await prisma.document.update({
         where: { id: documentId },
@@ -78,7 +83,12 @@ class DocumentsService {
       const wordCounts = pdfResult.word_counts || {};
 
       // STEP 2: Image extraction + smart OCR — fire and forget
-      pythonClient.extractImages(documentId, normalizedPath)
+      pythonClient.extractImages(
+        documentId,
+        normalizedPath,
+        file.originalname,
+        file.mimetype
+      )
         .then(async () => {
           try {
             const images = await prisma.documentImage.findMany({
