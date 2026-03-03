@@ -4,12 +4,13 @@
 const { PrismaClient } = require('@prisma/client');
 const Groq = require('groq-sdk');
 const axios = require('axios');
+const config = require('../config');
 const embeddingSearchService = require('../services/vector/embedding-search.service');
 
 const prisma = new PrismaClient();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const BASE_URL       = process.env.BASE_URL            || 'http://localhost:5000';
+const PYTHON_SERVICE_URL = (config.PYTHON_SERVICE_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 const GROQ_MODEL     = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
 const GROQ_MAX_TOKENS= parseInt(process.env.GROQ_MAX_TOKENS  || '9000', 10);
@@ -23,7 +24,7 @@ const EMBED_TOP_K    = 20; // Retrieve more chunks — POSC spans many pages
 
 function toImageUrl(storagePath) {
   if (!storagePath) return null;
-  return `${BASE_URL}/outputs/${storagePath.split(/[/\\]/).pop()}`;
+  return `${PYTHON_SERVICE_URL}/outputs/${encodeURIComponent(storagePath.split(/[/\\]/).pop())}`;
 }
 
 function extractPageNumbers(text) {

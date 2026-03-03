@@ -2,12 +2,13 @@
 'use strict';
 
 const { PrismaClient } = require('@prisma/client');
+const config = require('../../config');
 const { logger } = require('../../utils/logger');
 const pythonClient = require('../python-client.service');
 
 const prisma = new PrismaClient();
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:5000';
+const PYTHON_SERVICE_URL = (config.PYTHON_SERVICE_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
 class EmbeddingSearchService {
   constructor() {
@@ -50,7 +51,7 @@ class EmbeddingSearchService {
         let imageUrl = null;
         if (e.sourceImage?.storagePath) {
           const filename = e.sourceImage.storagePath.split(/[/\\]/).pop();
-          imageUrl = `${BASE_URL}/outputs/${filename}`;
+          imageUrl = `${PYTHON_SERVICE_URL}/outputs/${encodeURIComponent(filename)}`;
         }
 
         return {

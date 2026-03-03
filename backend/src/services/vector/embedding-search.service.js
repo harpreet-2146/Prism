@@ -122,7 +122,7 @@ class EmbeddingSearchService {
           let imageUrl = null;
           if (e.sourceImage?.storagePath) {
             const p = e.sourceImage.storagePath.replace(/\\/g, '/').split('/').pop();
-            imageUrl = `${config.BASE_URL}/outputs/${p}`;
+            imageUrl = `${config.PYTHON_SERVICE_URL.replace(/\/+$/, '')}/outputs/${encodeURIComponent(p)}`;
           }
 
           scored.push({
